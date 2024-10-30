@@ -3,32 +3,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 
-# -- Position
-def generate_uniform_positions(N: int) -> np.ndarray:
-    """Creates 2D positions for each node in the graph."""
-    xs = np.random.uniform(low=0, high=1, size=N)  # (N,)
-    ys = np.random.uniform(low=0, high=1, size=N)  # (N,)
-    positions = np.stack([xs, ys])  # (2, N)
-    return positions.T  # (N, 2)
-
-
-def compute_distance_matrix(pos: np.ndarray) -> np.ndarray:
-    """Computes distances for every node to every other node.
-    Essentially batch computes L2 norm.
-    """
-    # (N, 1, 2) - (1, N, 2) -> (N, N, 2)
-    diff = pos[:, np.newaxis, :] - pos[np.newaxis, :, :]
-    # (N, N, 2) -> (N, N)
-    dist_matrix = np.sqrt(np.sum(diff**2, axis=-1))
-    return dist_matrix
-
-
-# -- Reward
-def generate_uniform_reward(N: int) -> np.ndarray:
-    """Computes random reward for each node in the graph."""
-    return np.random.uniform(low=0, high=1, size=N)
-
-
 # -- Main
 def generate_random_graph(num_nodes: int) -> nx.Graph:
     """Generates a random complete graph.
@@ -61,6 +35,32 @@ def generate_random_graph(num_nodes: int) -> nx.Graph:
     return G
 
 
+# -- Position
+def generate_uniform_positions(N: int) -> np.ndarray:
+    """Creates 2D positions for each node in the graph."""
+    xs = np.random.uniform(low=0, high=1, size=N)  # (N,)
+    ys = np.random.uniform(low=0, high=1, size=N)  # (N,)
+    positions = np.stack([xs, ys])  # (2, N)
+    return positions.T  # (N, 2)
+
+
+def compute_distance_matrix(pos: np.ndarray) -> np.ndarray:
+    """Computes distances for every node to every other node.
+    Essentially batch computes L2 norm.
+    """
+    # (N, 1, 2) - (1, N, 2) -> (N, N, 2)
+    diff = pos[:, np.newaxis, :] - pos[np.newaxis, :, :]
+    # (N, N, 2) -> (N, N)
+    dist_matrix = np.sqrt(np.sum(diff**2, axis=-1))
+    return dist_matrix
+
+
+# -- Reward
+def generate_uniform_reward(N: int) -> np.ndarray:
+    """Computes random reward for each node in the graph."""
+    return np.random.uniform(low=0, high=1, size=N)
+
+
 # -- Visualization
 def visualize_graph(G: nx.Graph, pos_key="position"):
     pos = nx.get_node_attributes(G, pos_key)
@@ -76,10 +76,13 @@ def visualize_graph(G: nx.Graph, pos_key="position"):
 if __name__ == "__main__":
     import time
 
-    _ = generate_random_graph(20)  # warmup
+    N = 100  # num_nodes
+
+    _ = generate_random_graph(N)  # warmup
 
     start = time.time()
-    G = generate_random_graph(20)
+    G = generate_random_graph(N)
     print(time.time() - start)
 
-    visualize_graph(G)
+    # visualize_graph(G)
+    print(G)
