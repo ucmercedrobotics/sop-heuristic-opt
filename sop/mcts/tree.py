@@ -17,7 +17,7 @@ class Tree:
     failure_probs: Array  # [B, N], raw failure probability for each node
     node_visits: Array  # [B, N], visit counts for each node
     parents: Array  # [B, N], node index for the parents of each node
-    neighbor_from_parent: Array # [B, N], the neighbor index to take from the parent to each each node
+    neighbor_from_parent: Array # [B, N], the neighbor index to take from the parent to each node
     children_index: Array  # [B, N, num_neighbors], the node index of the neighbor if visited
     children_values: Array  # [B, N, num_neighbors], the value of traveling to neighbor from node
     children_failure_probs: Array  # [B, N, num_nodes], the failure prob of traveling to neighbor from node

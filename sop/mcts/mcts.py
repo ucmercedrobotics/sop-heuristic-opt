@@ -3,10 +3,11 @@ import torch
 from torch_geometric.data import Data, Batch
 
 from sop.mcts.tree import Tree
+from sop.utils.graph_pyg import Graph
 
 
 def run(
-    graph: Data,
+    graph: Graph,
     start_node: torch.Tensor,
     end_node: torch.Tensor,
     budget: torch.Tensor,
@@ -36,7 +37,7 @@ def run(
 
 
 def MCTS_SOPCC(
-    graph: Data, current_node: torch.Tensor, budget: torch.Tensor, num_simulations: int
+    graph: Graph, current_node: torch.Tensor, budget: torch.Tensor, num_simulations: int
 ):
     # Create new MCTS state
     # Loop for K iterations
@@ -51,9 +52,9 @@ def MCTS_SOPCC(
     tree = instantiate_tree_from_root(current_node, graph, num_simulations)
     # For K iterations
     # Select new child vertex with UCTF
-    next_node, next_neighbor_index = simulate(tree, max_depth=num_simulations)
-    print(next_node)
-    print(next_neighbor_index)
+    parent_node, leaf_node_index, depth = simulate(tree, max_depth=num_simulations)
+    path = create_path_from_root(tree, graph, parent_node, leaf_node_index, depth)
+    ts = sample_traverse_cost(path, samples=10, kappa=0.5)
     #   for S iterations do
     #       t = SampleTraverseTime(v, v_j)
     # TODO: Compute Q[v_j] and F[v_j] based on the S rollouts
@@ -61,11 +62,11 @@ def MCTS_SOPCC(
 
 
 def instantiate_tree_from_root(
-    root_index: torch.Tensor, graph: Batch, num_simulations: int
+    root_index: torch.Tensor, graph: Graph, num_simulations: int
 ):
     # Infer shape
-    batch_size = graph.batch_size
-    num_nodes = graph.num_nodes // batch_size
+    batch_size = graph.data.batch_size
+    num_nodes = graph.data.num_nodes // batch_size
 
     # Need nodes for root + N simulations
     batch_node = (batch_size, num_simulations + 1)
@@ -127,14 +128,10 @@ def increase_visit_count(
     tree.children_visits[indices, parent, action] += 1
 
 
-@dataclass
-class _SimulationState:
-    node_index: torch.Tensor  # [B,]
-    next_neighbor_index: torch.Tensor  # [B,]
-
-
 # TODO: Add contiguous?
-def simulate(tree: Tree, max_depth: int, z: float = 0.1) -> _SimulationState:
+def simulate(
+    tree: Tree, max_depth: int, z: float = 0.1
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Select the next leaf node to expand using the tree policy."""
     # TODO: Make this cleaner
 
@@ -142,17 +139,16 @@ def simulate(tree: Tree, max_depth: int, z: float = 0.1) -> _SimulationState:
     batch_shape = (batch_size,)
 
     root_node = torch.full(batch_shape, Tree.ROOT_INDEX)  # [B,]
-    indices = torch.arange(batch_size)  # [B,]
-    depth = torch.zeros(batch_shape)  # [B,]
 
-    state = _SimulationState(
-        node_index=root_node,
-        next_neighbor_index=torch.full(batch_shape, Tree.UNVISITED),
-    )
+    # Loop State
+    parent_node = root_node
+    leaf_node_index = torch.full(batch_shape, Tree.UNVISITED)
+    indices = torch.arange(batch_size)  # [B,]
+    depth = torch.zeros(batch_shape, dtype=torch.int32)  # [B,]
 
     while indices.numel() > 0:
         # Only worry about continuing nodes
-        current_node = state.node_index[indices]  # [I,]
+        current_node = parent_node[indices]  # [I,]
 
         increase_visit_count(tree, indices, current_node, depth)
 
@@ -162,7 +158,7 @@ def simulate(tree: Tree, max_depth: int, z: float = 0.1) -> _SimulationState:
         next_neighbor = tree.children_index[indices, current_node, next_neighbor_index]
 
         # Add best neighbors for current_nodes
-        state.next_neighbor_index[indices] = next_neighbor_index
+        leaf_node_index[indices] = next_neighbor_index
 
         # From this point there are two cases:
         # 1. node is a leaf -> return and expand node
@@ -174,6 +170,91 @@ def simulate(tree: Tree, max_depth: int, z: float = 0.1) -> _SimulationState:
 
         # mask out indices and add expanded next_neighbors to state
         indices = indices[is_continuing]  # [I',]
-        state.node_index[indices] = next_neighbor[is_continuing]
+        parent_node[indices] = next_neighbor[is_continuing]
 
-    return state.node_index, state.next_neighbor_index
+    return parent_node, leaf_node_index, depth
+
+
+def create_path_from_root(
+    tree: Tree,
+    graph: Graph,
+    parent_node: torch.Tensor,
+    leaf_node_index: torch.Tensor,
+    depth: torch.Tensor,
+) -> torch.Tensor:
+    """Backtrack tree to create paths for each node. Paths are in reverse and are padded with -1."""
+    batch_size = tree.infer_batch_size()
+    max_depth = torch.max(depth)
+
+    indices = torch.arange(batch_size)
+    path = torch.full((batch_size, max_depth), -1, dtype=torch.float32)
+    path_index = 0
+
+    # Add leaf nodes to path
+    from_idx = tree.node_mapping[indices, parent_node]
+    to_idx = leaf_node_index
+    dist = graph.adj[indices, from_idx, to_idx]
+    path[indices, path_index] = dist
+
+    # Traverse back to root
+    current_node = parent_node
+    while True:
+        # Get parent nodes
+        parents = tree.parents[indices, current_node]
+        # mask out nodes without parents
+        is_not_root = parents != Tree.NO_PARENT
+        indices = indices[is_not_root]
+        to_idx = from_idx[is_not_root]
+        current_node = parents[is_not_root]
+
+        # If no more nodes have parents, break
+        if indices.numel() <= 0:
+            break
+
+        # Get edge distances
+        from_idx = tree.node_mapping[indices, current_node]
+        dist = graph.adj[indices, from_idx, to_idx]
+        # Add to path
+        path_index += 1
+        path[indices, path_index] = dist
+
+    return path
+
+
+def sample_cost(weight: torch.Tensor, num_samples: int = 2, kappa: float = 0.5):
+    rate = 1 / ((1 - kappa) * weight)
+    distribution = torch.distributions.Exponential(rate=rate)
+    # (samples, batch_size) -> (batch_size, samples)
+    samples = distribution.sample((num_samples,)).T
+    # (batch_size, 1) + (batch_size, samples)
+    return (kappa * weight).unsqueeze(-1) + samples
+
+
+def sample_traverse_cost(path: torch.Tensor, samples: int = 2, kappa: float = 0.5):
+    batch_size, max_length = path.shape
+    total_sampled_cost = torch.zeros((batch_size, samples))
+
+    indices = torch.arange(batch_size)
+    path_index = 0
+
+    while True:
+        weight = path[indices, path_index]
+
+        # check if weight is -1
+        is_continuing = weight != -1
+        # mask values
+        indices = indices[is_continuing]
+        weight = weight[is_continuing]
+
+        if indices.numel() <= 0:
+            break
+
+        # Sample and add to total cost
+        sampled_cost = sample_cost(weight, samples, kappa)
+        total_sampled_cost[indices] += sampled_cost
+
+        path_index += 1
+        if path_index > max_length - 1:
+            break
+
+    return total_sampled_cost

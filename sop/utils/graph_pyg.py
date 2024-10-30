@@ -1,7 +1,15 @@
+from dataclasses import dataclass
 import torch
 import matplotlib.pyplot as plt
 from torch_geometric.data import Data, Batch
 import torch_geometric.transforms as T
+
+
+# TODO: Make this cleaner
+@dataclass
+class Graph:
+    data: Batch
+    adj: torch.Tensor
 
 
 # -- Main
@@ -21,37 +29,27 @@ def generate_random_graph(num_nodes: int) -> Data:
 
     # 1. RadiusGraph to create a complete graph
     # 2. Distance to compute euclidean distance for every edge
-    transform = T.Compose([T.RadiusGraph(r=max_distance), T.Distance()])
+    transform = T.Compose([T.RadiusGraph(r=max_distance), T.Distance(norm=False)])
     data = transform(data)
     return data
 
 
-def generate_random_graph_batch(num_nodes: int, batch_size: int) -> Batch:
+def generate_random_graph_batch(num_nodes: int, batch_size: int) -> Graph:
     """Generates a batch of random complete graphs."""
-    batch_shape = (batch_size, num_nodes)
-    # Batch sample values
-    positions = generate_uniform_positions(size=batch_shape)
-    rewards = generate_uniform_reward(size=batch_shape)
-    # (2, B, N) -> (B, N, 2)
-    positions = positions.permute(1, 2, 0)
 
-    # Create batched graphs
+    # Create graphs
     data_list = []
-    for i in range(batch_size):
-        data = Data(pos=positions[i, :])
-        data.reward = rewards[i, :]
+    adj_lists = []
+    for _ in range(batch_size):
+        data = generate_random_graph(num_nodes)
+        adj = get_adjacency_matrix(data)
         data_list.append(data)
+        adj_lists.append(adj)
 
     batch = Batch.from_data_list(data_list)
+    batch_adj = torch.stack(adj_lists, dim=0)
 
-    # For a normalized graph, the maximum distance is sqrt(2) (when points are (0,0) and (1,1))
-    max_distance = (2**0.5) + 1e-5
-
-    # 1. RadiusGraph to create a complete graph
-    # 2. Distance to compute euclidean distance for every edge
-    transform = T.Compose([T.RadiusGraph(r=max_distance), T.Distance()])
-    batch = transform(batch)
-    return batch
+    return Graph(data=batch, adj=batch_adj)
 
 
 # -- Position
@@ -68,10 +66,29 @@ def generate_uniform_reward(size: tuple) -> torch.Tensor:
     return torch.rand(size)
 
 
+# -- Utilities
+def get_bytes(graph: Data | Batch):
+    """Returns the size of the graph(s) in bytes."""
+    return sum([v.element_size() * v.numel() for k, v in graph])
+
+
+def get_adjacency_matrix(data: Data) -> torch.Tensor:
+    """Returns dense adjacency matrix from Data object."""
+    num_nodes = data.num_nodes
+    edge_index = data.edge_index
+    edge_attr = data.edge_attr
+
+    adj_matrix = torch.sparse_coo_tensor(
+        edge_index, edge_attr.squeeze(), size=(num_nodes, num_nodes)
+    )
+
+    return adj_matrix.to_dense()
+
+
 if __name__ == "__main__":
     import time
 
-    N = 100  # num_nodes
+    N = 20  # num_nodes
     B = 1024  # batch_size
 
     # Single
@@ -79,15 +96,12 @@ if __name__ == "__main__":
     start = time.time()
     G = generate_random_graph(N)
     single_time = time.time() - start
+    print(f"Time elapsed single: {single_time}")
     print(G)
 
-    # Batch
-    _ = generate_random_graph_batch(N, B)  # warmup
     start = time.time()
-    G = generate_random_graph_batch(N, B)
+    G, A = generate_random_graph_batch(N, B)
     batch_time = time.time() - start
+    print(f"Time elapsed batched: {batch_time}")
     print(G)
-
-    print(f"Single graph: {single_time}")
-    print(f"Batch graph: {batch_time}")
-    print(f"Improvement Ratio: {(single_time * B) / batch_time}")
+    print(A.shape)

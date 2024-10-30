@@ -3,7 +3,8 @@ import hydra
 from omegaconf import DictConfig, OmegaConf
 import torch
 
-from sop.graph_pyg import generate_random_graph_batch, generate_random_graph
+from sop.utils.graph_pyg import generate_random_graph_batch, get_bytes
+from sop.utils.perf import profile
 from sop.mcts.mcts import run
 
 
@@ -24,13 +25,10 @@ def main(cfg: DictConfig) -> None:
     end_node = torch.full(size=(BATCH_SIZE,), fill_value=END_NODE)
     budget = torch.full(size=(BATCH_SIZE,), fill_value=BUDGET)
 
-    result = run(graph, start_node, end_node, budget, NUM_SIMULATIONS)
-    print(result)
+    # result = run(graph, start_node, end_node, budget, NUM_SIMULATIONS)
+    result = profile(100, run, graph, start_node, end_node, budget, NUM_SIMULATIONS)
 
-    start = time.time()
-    result = run(graph, start_node, end_node, budget, NUM_SIMULATIONS)
-    print(f"BATCH_SIZE: {BATCH_SIZE}")
-    print(time.time() - start)
+    print(result)
 
 
 if __name__ == "__main__":
