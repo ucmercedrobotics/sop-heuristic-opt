@@ -1,9 +1,13 @@
-from dataclasses import dataclass
 import torch
 from torch_geometric.data import Data, Batch
 
-from sop.mcts.tree import Tree
-from sop.utils.graph_pyg import Graph
+import sop.utils.graph_pyg as graph_lib
+import sop.mcts.tree as tree_lib
+import sop.mcts.path as path_lib
+
+Graph = graph_lib.Graph
+Tree = tree_lib.Tree
+Path = path_lib.Path
 
 
 def run(
@@ -16,12 +20,20 @@ def run(
     """Main SOP function.
     Takes in original Graph, starting node id, ending node id, and budget.
     """
+    batch_size, num_nodes = graph_lib.infer_graph_shape(graph)
+
+    # Create path buffer
+    path = path_lib.create_path_from_start(graph, start_node)
+    print("--here--")
+
+    # TODO: Add indices to this function
+    indices = torch.arange(batch_size)
     current_node = start_node
 
     # the first action
     # while budget > 0 and current_node != end_node:
     # {
-    result = MCTS_SOPCC(graph, current_node, budget, num_simulations)
+    result = MCTS_SOPCC(graph, path, current_node, budget, num_simulations)
     # move to vertex next_v in graph state
     # sampled_cost = incurred cost
     # budget = budget - sampled_cost
@@ -37,26 +49,24 @@ def run(
 
 
 def MCTS_SOPCC(
-    graph: Graph, current_node: torch.Tensor, budget: torch.Tensor, num_simulations: int
+    graph: Graph,
+    path: Path,
+    current_node: torch.Tensor,
+    budget: torch.Tensor,
+    num_simulations: int,
 ):
-    # Create new MCTS state
-    # Loop for K iterations
-    #   select new child vertex with UCTF(v)
-    #   for S iterations do
-    #       t = SampleTraverseTime(v, v_j)
-    #       B' = B - t
-    #       path <- rollout(v_j, B')
-    #   compute Q[v_j] and F[v_j] based on the S rollouts
-
     # Create new MCTS tree
     tree = instantiate_tree_from_root(current_node, graph, num_simulations)
     # For K iterations
     # Select new child vertex with UCTF
     parent_node, leaf_node_index, depth = simulate(tree, max_depth=num_simulations)
     path = create_path_from_root(tree, graph, parent_node, leaf_node_index, depth)
-    ts = sample_traverse_cost(path, samples=10, kappa=0.5)
-    #   for S iterations do
-    #       t = SampleTraverseTime(v, v_j)
+    print(path)
+    ts = sample_traverse_cost(path, samples=2, kappa=0.5)
+    new_budgets = budget.unsqueeze(-1) - ts
+    # try on first sample before batching
+    new_budgets = new_budgets[:, 0].squeeze()
+    paths = batch_rollout(leaf_node_index, new_budgets)
     # TODO: Compute Q[v_j] and F[v_j] based on the S rollouts
     return None
 
@@ -64,9 +74,7 @@ def MCTS_SOPCC(
 def instantiate_tree_from_root(
     root_index: torch.Tensor, graph: Graph, num_simulations: int
 ):
-    # Infer shape
-    batch_size = graph.data.batch_size
-    num_nodes = graph.data.num_nodes // batch_size
+    batch_size, num_nodes = graph_lib.infer_graph_shape(graph)
 
     # Need nodes for root + N simulations
     batch_node = (batch_size, num_simulations + 1)
@@ -129,13 +137,14 @@ def increase_visit_count(
 
 
 # TODO: Add contiguous?
+# TODO: Add masking for same node
 def simulate(
     tree: Tree, max_depth: int, z: float = 0.1
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Select the next leaf node to expand using the tree policy."""
     # TODO: Make this cleaner
 
-    batch_size = tree.infer_batch_size()
+    batch_size, _ = tree_lib.infer_tree_shape(tree)
     batch_shape = (batch_size,)
 
     root_node = torch.full(batch_shape, Tree.ROOT_INDEX)  # [B,]
@@ -183,40 +192,25 @@ def create_path_from_root(
     depth: torch.Tensor,
 ) -> torch.Tensor:
     """Backtrack tree to create paths for each node. Paths are in reverse and are padded with -1."""
-    batch_size = tree.infer_batch_size()
+    batch_size, _ = tree_lib.infer_tree_shape(tree)
     max_depth = torch.max(depth)
 
     indices = torch.arange(batch_size)
-    path = torch.full((batch_size, max_depth), -1, dtype=torch.float32)
-    path_index = 0
-
-    # Add leaf nodes to path
-    from_idx = tree.node_mapping[indices, parent_node]
-    to_idx = leaf_node_index
-    dist = graph.adj[indices, from_idx, to_idx]
-    path[indices, path_index] = dist
+    path = path_lib.create_path_from_start(
+        graph, leaf_node_index, max_length=max_depth + 1
+    )
 
     # Traverse back to root
     current_node = parent_node
-    while True:
-        # Get parent nodes
-        parents = tree.parents[indices, current_node]
+    while indices.numel() > 0:
+        current_node_index = tree.node_mapping[indices, current_node]
+        path_lib.add_node(path, graph, current_node_index, indices)
+
         # mask out nodes without parents
+        parents = tree.parents[indices, current_node]
         is_not_root = parents != Tree.NO_PARENT
         indices = indices[is_not_root]
-        to_idx = from_idx[is_not_root]
         current_node = parents[is_not_root]
-
-        # If no more nodes have parents, break
-        if indices.numel() <= 0:
-            break
-
-        # Get edge distances
-        from_idx = tree.node_mapping[indices, current_node]
-        dist = graph.adj[indices, from_idx, to_idx]
-        # Add to path
-        path_index += 1
-        path[indices, path_index] = dist
 
     return path
 
@@ -230,15 +224,15 @@ def sample_cost(weight: torch.Tensor, num_samples: int = 2, kappa: float = 0.5):
     return (kappa * weight).unsqueeze(-1) + samples
 
 
-def sample_traverse_cost(path: torch.Tensor, samples: int = 2, kappa: float = 0.5):
-    batch_size, max_length = path.shape
+def sample_traverse_cost(path: Path, samples: int = 2, kappa: float = 0.5):
+    batch_size, max_length = path_lib.infer_path_shape(path)
     total_sampled_cost = torch.zeros((batch_size, samples))
 
     indices = torch.arange(batch_size)
     path_index = 0
 
-    while True:
-        weight = path[indices, path_index]
+    while path_index < max_length:
+        weight = path.dists[indices, path_index]
 
         # check if weight is -1
         is_continuing = weight != -1
@@ -254,7 +248,25 @@ def sample_traverse_cost(path: torch.Tensor, samples: int = 2, kappa: float = 0.
         total_sampled_cost[indices] += sampled_cost
 
         path_index += 1
-        if path_index > max_length - 1:
-            break
 
     return total_sampled_cost
+
+
+def batch_rollout(path: Path, current_node: torch.Tensor, budget: torch.Tensor):
+    print(current_node)
+    print(current_node.shape)
+    # current = current_node
+    # path = [current_node, ...]
+    # while True
+    # get new
+    # new = select random
+    # or new = select greedy
+    # if new != goal
+    #   if Pr[C(current,new, vg) < B] <= P_f then
+    #       append new to path
+    #       B' <- B' - samplecost(current, new)
+    #       current <- new
+    # else
+    #   append new to path
+    #   return path
+    ...

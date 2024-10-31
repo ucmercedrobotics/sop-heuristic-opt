@@ -8,8 +8,10 @@ import torch_geometric.transforms as T
 # TODO: Make this cleaner
 @dataclass
 class Graph:
-    data: Batch
-    adj: torch.Tensor
+    data: Batch  # PyG compatible structure
+    dists: torch.Tensor  # Adjacency matrix
+    rewards: torch.Tensor  # rewards for each node
+    positions: torch.Tensor  # x,y positions for each node
 
 
 # -- Main
@@ -31,25 +33,32 @@ def generate_random_graph(num_nodes: int) -> Data:
     # 2. Distance to compute euclidean distance for every edge
     transform = T.Compose([T.RadiusGraph(r=max_distance), T.Distance(norm=False)])
     data = transform(data)
-    return data
+    return data, rewards, positions
 
 
 def generate_random_graph_batch(num_nodes: int, batch_size: int) -> Graph:
     """Generates a batch of random complete graphs."""
+    # TODO: Make this cleaner..
 
     # Create graphs
     data_list = []
-    adj_lists = []
+    dist_list = []
+    reward_list = []
+    position_list = []
     for _ in range(batch_size):
-        data = generate_random_graph(num_nodes)
+        data, rewards, positions = generate_random_graph(num_nodes)
         adj = get_adjacency_matrix(data)
         data_list.append(data)
-        adj_lists.append(adj)
+        dist_list.append(adj)
+        reward_list.append(rewards)
+        position_list.append(positions)
 
-    batch = Batch.from_data_list(data_list)
-    batch_adj = torch.stack(adj_lists, dim=0)
-
-    return Graph(data=batch, adj=batch_adj)
+    return Graph(
+        data=Batch.from_data_list(data_list),
+        dists=torch.stack(dist_list, dim=0),
+        rewards=torch.stack(reward_list, dim=0),
+        positions=torch.stack(position_list, dim=0),
+    )
 
 
 # -- Position
@@ -85,23 +94,28 @@ def get_adjacency_matrix(data: Data) -> torch.Tensor:
     return adj_matrix.to_dense()
 
 
+def infer_graph_shape(graph: Graph):
+    batch_size = graph.data.batch_size
+    num_nodes = graph.data.num_nodes // batch_size
+    return (batch_size, num_nodes)
+
+
 if __name__ == "__main__":
     import time
 
-    N = 20  # num_nodes
-    B = 1024  # batch_size
+    N = 100  # num_nodes
+    B = 10000  # batch_size
 
     # Single
-    _ = generate_random_graph(N)  # warmup
+    _, _, _ = generate_random_graph(N)  # warmup
     start = time.time()
-    G = generate_random_graph(N)
+    G, R, P = generate_random_graph(N)
     single_time = time.time() - start
     print(f"Time elapsed single: {single_time}")
     print(G)
 
     start = time.time()
-    G, A = generate_random_graph_batch(N, B)
+    G = generate_random_graph_batch(N, B)
     batch_time = time.time() - start
     print(f"Time elapsed batched: {batch_time}")
     print(G)
-    print(A.shape)
