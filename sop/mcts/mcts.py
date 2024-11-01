@@ -50,7 +50,7 @@ def run(
 
 def MCTS_SOPCC(
     graph: Graph,
-    path: Path,
+    current_path: Path,
     current_node: torch.Tensor,
     budget: torch.Tensor,
     num_simulations: int,
@@ -59,14 +59,15 @@ def MCTS_SOPCC(
     tree = instantiate_tree_from_root(current_node, graph, num_simulations)
     # For K iterations
     # Select new child vertex with UCTF
-    parent_node, leaf_node_index, depth = simulate(tree, max_depth=num_simulations)
-    path = create_path_from_root(tree, graph, parent_node, leaf_node_index, depth)
-    print(path)
-    ts = sample_traverse_cost(path, samples=2, kappa=0.5)
+    parent_node, leaf_node_index, depth, path_from_root = simulate(
+        tree, graph, current_path, max_depth=num_simulations
+    )
+    # path = create_path_from_root(tree, graph, parent_node, leaf_node_index, depth)
+    ts = sample_traverse_cost(path_from_root, samples=2, kappa=0.5)
     new_budgets = budget.unsqueeze(-1) - ts
     # try on first sample before batching
     new_budgets = new_budgets[:, 0].squeeze()
-    paths = batch_rollout(leaf_node_index, new_budgets)
+    paths = batch_rollout(graph, path_from_root, leaf_node_index, new_budgets)
     # TODO: Compute Q[v_j] and F[v_j] based on the S rollouts
     return None
 
@@ -139,7 +140,7 @@ def increase_visit_count(
 # TODO: Add contiguous?
 # TODO: Add masking for same node
 def simulate(
-    tree: Tree, max_depth: int, z: float = 0.1
+    tree: Tree, graph: Graph, current_path: Path, max_depth: int, z: float = 0.1
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Select the next leaf node to expand using the tree policy."""
     # TODO: Make this cleaner
@@ -155,19 +156,30 @@ def simulate(
     indices = torch.arange(batch_size)  # [B,]
     depth = torch.zeros(batch_shape, dtype=torch.int32)  # [B,]
 
+    # Create path from root_node
+    root_node_idx = tree.node_mapping[indices, parent_node]
+    path = path_lib.create_path_from_start(graph, root_node_idx)
+
+    # Add mask from current_path to new_path
+    path_lib.combine_masks(path, current_path)
+
     while indices.numel() > 0:
         # Only worry about continuing nodes
         current_node = parent_node[indices]  # [I,]
 
         increase_visit_count(tree, indices, current_node, depth)
 
-        # Compute the uctf score and choose the next best neigbhbor to traverse.
+        # Compute the uctf score
         scores = compute_uctf(tree, indices, current_node, z)  # [I, A]
+        # mask scores to remove visited nodes
+        scores = scores.masked_fill_(path.mask[indices], 0)  # [I, A]
+        # Choose next neighbor to traverse
         next_neighbor_index = torch.argmax(scores, axis=-1)  # [I,]
         next_neighbor = tree.children_index[indices, current_node, next_neighbor_index]
 
         # Add best neighbors for current_nodes
         leaf_node_index[indices] = next_neighbor_index
+        path_lib.add_node(path, graph, next_neighbor_index, indices)
 
         # From this point there are two cases:
         # 1. node is a leaf -> return and expand node
@@ -181,38 +193,7 @@ def simulate(
         indices = indices[is_continuing]  # [I',]
         parent_node[indices] = next_neighbor[is_continuing]
 
-    return parent_node, leaf_node_index, depth
-
-
-def create_path_from_root(
-    tree: Tree,
-    graph: Graph,
-    parent_node: torch.Tensor,
-    leaf_node_index: torch.Tensor,
-    depth: torch.Tensor,
-) -> torch.Tensor:
-    """Backtrack tree to create paths for each node. Paths are in reverse and are padded with -1."""
-    batch_size, _ = tree_lib.infer_tree_shape(tree)
-    max_depth = torch.max(depth)
-
-    indices = torch.arange(batch_size)
-    path = path_lib.create_path_from_start(
-        graph, leaf_node_index, max_length=max_depth + 1
-    )
-
-    # Traverse back to root
-    current_node = parent_node
-    while indices.numel() > 0:
-        current_node_index = tree.node_mapping[indices, current_node]
-        path_lib.add_node(path, graph, current_node_index, indices)
-
-        # mask out nodes without parents
-        parents = tree.parents[indices, current_node]
-        is_not_root = parents != Tree.NO_PARENT
-        indices = indices[is_not_root]
-        current_node = parents[is_not_root]
-
-    return path
+    return parent_node, leaf_node_index, depth, path
 
 
 def sample_cost(weight: torch.Tensor, num_samples: int = 2, kappa: float = 0.5):
@@ -252,9 +233,12 @@ def sample_traverse_cost(path: Path, samples: int = 2, kappa: float = 0.5):
     return total_sampled_cost
 
 
-def batch_rollout(path: Path, current_node: torch.Tensor, budget: torch.Tensor):
-    print(current_node)
-    print(current_node.shape)
+def batch_rollout(
+    graph: Graph, path_from_root: Path, leaf_node: torch.Tensor, budget: torch.Tensor
+):
+    print(path_from_root)
+    print(leaf_node)
+    print(leaf_node.shape)
     # current = current_node
     # path = [current_node, ...]
     # while True
