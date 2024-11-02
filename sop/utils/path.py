@@ -50,10 +50,13 @@ def create_path_from_start(
 
     # Add root to path
     path.nodes[:, 0] = start_node
-    path.length += 1
+
+    # TODO: add reward, still unsure if this is needed.
 
     # add start_node to mask
     path.mask[:, start_node] = 1
+
+    path.length += 1
 
     return path
 
@@ -75,9 +78,13 @@ def add_node(path: Path, graph: Graph, node: torch.Tensor, indices: torch.Tensor
     # add node to mask
     path.mask[indices, node] = 1
 
-    path.length += 1
+    path.length[indices] += 1
 
 
 def combine_masks(this: Path, other: Path):
     """Combine the masks of two paths without adding the nodes to path."""
     this.mask = torch.logical_or(this.mask, other.mask)
+
+
+def add_to_mask(path: Path, node: torch.Tensor, indices: torch.Tensor):
+    path.mask[indices, node] = 1

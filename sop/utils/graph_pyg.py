@@ -103,8 +103,8 @@ def infer_graph_shape(graph: Graph):
 if __name__ == "__main__":
     import time
 
-    N = 100  # num_nodes
-    B = 10000  # batch_size
+    N = 20  # num_nodes
+    B = 256  # batch_size
 
     # Single
     _, _, _ = generate_random_graph(N)  # warmup
@@ -112,10 +112,8 @@ if __name__ == "__main__":
     G, R, P = generate_random_graph(N)
     single_time = time.time() - start
     print(f"Time elapsed single: {single_time}")
-    print(G)
 
     start = time.time()
     G = generate_random_graph_batch(N, B)
     batch_time = time.time() - start
     print(f"Time elapsed batched: {batch_time}")
-    print(G)
