@@ -12,7 +12,7 @@ from sop.mcts.mcts import run
 def main(cfg: DictConfig) -> None:
     # print(OmegaConf.to_yaml(cfg))
     # TODO: Add configuration to hydra config.yaml
-    BATCH_SIZE = 100
+    BATCH_SIZE = 1000
     NUM_SIMULATIONS = 50
     NUM_NODES = 20
     BUDGET = 2.0
@@ -26,7 +26,7 @@ def main(cfg: DictConfig) -> None:
     budget = torch.full(size=(BATCH_SIZE,), fill_value=BUDGET)
 
     # result = run(graph, start_node, goal_node, budget, NUM_SIMULATIONS)
-    result = profile(3, run, graph, start_node, goal_node, budget, NUM_SIMULATIONS)
+    result = profile(1, run, graph, start_node, goal_node, budget, NUM_SIMULATIONS)
 
     print(result)
 
