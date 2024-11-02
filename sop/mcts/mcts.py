@@ -70,6 +70,7 @@ def MCTS_SOPCC(
     # Create new MCTS tree
     tree = instantiate_tree_from_root(current_node, graph, num_simulations)
     for k in range(num_simulations):
+        start = time.time()
         # For K iterations
         # Select new child vertex with UCTF
         parent_node, leaf_node_index, depth, path_from_root = simulate(
@@ -78,9 +79,9 @@ def MCTS_SOPCC(
         Q, F = rollouts(
             graph, heuristic, goal_node, path_from_root, leaf_node_index, budget, 100
         )
-        expand(tree, parent_node, leaf_node_index, Q, F)
-        # TODO: backup
-        break
+        leaf_node = expand(tree, parent_node, leaf_node_index, Q, F)
+        backup(tree, graph, leaf_node)
+        print(f"{k}: {time.time() - start}")
     return None
 
 
@@ -247,6 +248,7 @@ def sample_traverse_cost(path: Path, samples: int = 2, kappa: float = 0.5):
     return total_sampled_cost
 
 
+# TODO: clean this up
 def expand(
     tree: Tree,
     parent_node: torch.Tensor,
@@ -283,6 +285,8 @@ def expand(
         tree.children_values[ui, p, l] = q
         tree.children_failure_probs[ui, p, l] = f
 
+        tree.num_nodes[ui] += 1
+
     # update Q and F if node is visited
     is_visited = ~is_unvisited
     vi = indices[is_visited]
@@ -299,6 +303,77 @@ def expand(
         tree.node_visits[ui, new_idx] += 1  # TODO: Do we need this?
         tree.children_values[ui, p, l] = q
         tree.children_failure_probs[ui, p, l] = f
+
+    leaf_node = torch.zeros((batch_size,), dtype=torch.long)
+    leaf_node[ui] = new_idx
+    leaf_node[vi] = idx
+
+    return leaf_node
+
+
+def backup(tree: Tree, graph: Graph, leaf_node: torch.Tensor, p_f: float = 0.1):
+    batch_size, _ = tree_lib.infer_tree_shape(tree)
+    indices = torch.arange(batch_size)
+
+    vj = leaf_node
+    vj_mapping = tree.neighbor_from_parent[indices, vj]
+    vi = tree.parents[indices, vj]
+    vk = tree.parents[indices, vj]
+
+    # check if v_k is null
+    has_parent = vk != Tree.NO_PARENT
+    indices = indices[has_parent]
+
+    while indices.numel() > 0:
+        vi_mapping = tree.neighbor_from_parent[indices, vi]
+        vi_q = tree.children_values[indices, vk, vi_mapping]
+        vi_f = tree.children_failure_probs[indices, vk, vi_mapping]
+        vi_r = graph.rewards[indices, vi_mapping]
+
+        vj = tree.children_index[indices, vi, vj_mapping]
+        vj_q = tree.children_values[indices, vi, vj_mapping]
+        vj_f = tree.children_failure_probs[indices, vi, vj_mapping]
+
+        new_q = vj_q + vi_r
+        new_f = vj_f
+
+        # condition 1
+        # if vk.F[vi] < Pf
+        a = vi_f < p_f
+        a_i = indices[a]
+        #   if vi.F[vj] < Pf
+        b = vj_f[a_i] < p_f
+        b_i = a_i[b]
+        #     if vk.Q[vi] < vi.Q[vj] + r(vi)
+        c = vi_q[b_i] < new_q[b_i]
+        c_i = b_i[c]
+
+        # condition 2
+        # else if vk.F[vi] > vi.F[vj]
+        not_a = ~a
+        d = vi_f[not_a] > new_f[not_a]
+        d_i = indices[not_a][d]
+
+        valid_i = torch.concat([c_i, d_i])
+
+        # condition #1 and #2
+        if valid_i.numel() > 0:
+            valid_vk = vk[valid_i]
+            valid_vi = vi[valid_i]
+            valid_vi_mapping = vi_mapping[valid_i]
+            new_q = new_q[valid_i]
+            new_f = new_f[valid_i]
+            tree.node_values[valid_i, valid_vi] = new_q
+            tree.children_values[valid_i, valid_vk, valid_vi_mapping] = new_q
+            tree.failure_probs[valid_i, valid_vi] = new_f
+            tree.children_failure_probs[valid_i, valid_vk, valid_vi_mapping] = new_f
+
+        # update values
+        vi = vk
+        vk = tree.parents[indices, vk]
+
+        has_parent = vk != Tree.NO_PARENT
+        indices = indices[has_parent]
 
 
 def rollouts(
