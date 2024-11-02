@@ -14,6 +14,7 @@ class Tree:
     node_mapping: Array  # [B, N], index of node in original graph
     raw_values: Array  # [B, N], raw computed value for each node
     node_values: Array  # [B, N], cumulative search value for each node
+    raw_failure_probs: Array  # [B, N], raw failure probability for each node
     failure_probs: Array  # [B, N], raw failure probability for each node
     node_visits: Array  # [B, N], visit counts for each node
     parents: Array  # [B, N], node index for the parents of each node
@@ -30,6 +31,8 @@ class Tree:
         Array  # [B, N, num_nodes], the failure prob of traveling to neighbor from node
     )
     children_visits: Array  # [B, N, num_nodes], the visit counts for each neighbor
+
+    num_nodes: Array  # [B,], amount of visited nodes in the tree
 
     # Static class variables
     ROOT_INDEX: ClassVar[int] = 0

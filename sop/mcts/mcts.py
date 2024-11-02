@@ -69,26 +69,18 @@ def MCTS_SOPCC(
 ):
     # Create new MCTS tree
     tree = instantiate_tree_from_root(current_node, graph, num_simulations)
-    # For K iterations
-    # Select new child vertex with UCTF
-    parent_node, leaf_node_index, depth, path_from_root = simulate(
-        tree, graph, current_path, max_depth=num_simulations
-    )
-    Q, F = rollouts(
-        graph, heuristic, goal_node, path_from_root, leaf_node_index, budget, 100
-    )
-    # path = create_path_from_root(tree, graph, parent_node, leaf_node_index, depth)
-    # ts = sample_traverse_cost(path_from_root, samples=2, kappa=0.5)
-    # new_budgets = budget.unsqueeze(-1) - ts
-    # try on first sample before batching
-    # new_budgets = new_budgets[:, 0].squeeze()
-    # s = time.time()
-    # paths = batch_rollout(
-    #     graph, heuristic, goal_node, path_from_root, leaf_node_index, new_budgets
-    # )
-    # print(f"rollout: {time.time() - s}")
-    # print(paths)
-    # TODO: Compute Q[v_j] and F[v_j] based on the S rollouts
+    for k in range(num_simulations):
+        # For K iterations
+        # Select new child vertex with UCTF
+        parent_node, leaf_node_index, depth, path_from_root = simulate(
+            tree, graph, current_path, max_depth=num_simulations
+        )
+        Q, F = rollouts(
+            graph, heuristic, goal_node, path_from_root, leaf_node_index, budget, 100
+        )
+        expand(tree, parent_node, leaf_node_index, Q, F)
+        # TODO: backup
+        break
     return None
 
 
@@ -104,17 +96,21 @@ def instantiate_tree_from_root(
 
     # Create empty tree
     tree = Tree(
-        node_mapping=torch.full(batch_node, Tree.UNVISITED),
+        node_mapping=torch.full(batch_node, Tree.UNVISITED, dtype=torch.long),
         raw_values=torch.zeros(batch_node),
         node_values=torch.zeros(batch_node),
+        raw_failure_probs=torch.zeros(batch_node),
         failure_probs=torch.zeros(batch_node),
         node_visits=torch.zeros(batch_node),
         parents=torch.full(batch_node, Tree.NO_PARENT),
         neighbor_from_parent=torch.full(batch_node, Tree.UNVISITED),
-        children_index=torch.full(batch_node_neighbors, Tree.UNVISITED),
+        children_index=torch.full(
+            batch_node_neighbors, Tree.UNVISITED, dtype=torch.long
+        ),
         children_values=torch.zeros(batch_node_neighbors),
         children_failure_probs=torch.zeros(batch_node_neighbors),
         children_visits=torch.zeros(batch_node_neighbors),
+        num_nodes=torch.ones((batch_size,), dtype=torch.long),  # start with root node
     )
 
     # TODO: Add more values for root
@@ -251,6 +247,60 @@ def sample_traverse_cost(path: Path, samples: int = 2, kappa: float = 0.5):
     return total_sampled_cost
 
 
+def expand(
+    tree: Tree,
+    parent_node: torch.Tensor,
+    leaf_node_index: torch.Tensor,
+    Q: torch.Tensor,
+    F: torch.Tensor,
+):
+    batch_size, _ = tree_lib.infer_tree_shape(tree)
+    num_nodes = tree.num_nodes
+
+    indices = torch.arange(batch_size)
+
+    # Find index of node
+    child_node = tree.children_index[indices, parent_node, leaf_node_index]
+    is_unvisited = child_node == Tree.UNVISITED
+
+    # add node to tree if unvisited
+    ui = indices[is_unvisited]  # unvisited indices
+    new_idx = num_nodes[is_unvisited]  # new index in tree
+    if ui.numel() > 0:
+        p = parent_node[ui]
+        l = leaf_node_index[ui]
+        q = Q[ui]
+        f = F[ui]
+
+        tree.node_mapping[ui, new_idx] = l
+        tree.raw_values[ui, new_idx] = q
+        tree.raw_failure_probs[ui, new_idx] = f
+        tree.node_visits[ui, new_idx] = 1
+
+        tree.neighbor_from_parent[ui, new_idx] = l
+        tree.parents[ui, new_idx] = p
+        tree.children_index[ui, p, l] = new_idx
+        tree.children_values[ui, p, l] = q
+        tree.children_failure_probs[ui, p, l] = f
+
+    # update Q and F if node is visited
+    is_visited = ~is_unvisited
+    vi = indices[is_visited]
+    idx = child_node[is_visited]
+    if vi.numel() > 0:
+        p = parent_node[vi]
+        l = leaf_node_index[vi]
+        q = Q[vi]
+        f = F[vi]
+
+        # TODO: Update average instead of replacing
+        tree.raw_values[ui, idx] = q
+        tree.raw_failure_probs[ui, new_idx] = f
+        tree.node_visits[ui, new_idx] += 1  # TODO: Do we need this?
+        tree.children_values[ui, p, l] = q
+        tree.children_failure_probs[ui, p, l] = f
+
+
 def rollouts(
     graph: Graph,
     heuristic: Heuristic,
@@ -324,15 +374,15 @@ def rollout(
 
     # Buffer for q and success
     Q = torch.zeros((batch_size,))
-    success = torch.zeros((batch_size,))
+    failures = torch.ones((batch_size,))
 
     # mask for greedy, distribution for random
     mask = path_from_root.mask.clone()
     distribution = (~mask).float()
 
     # loop state
-    current_node = leaf_node
-    simulated_budget = B_prime
+    current_node = leaf_node.clone()
+    simulated_budget = B_prime.clone()
     indices = torch.arange(batch_size)
 
     # Add reward of leaf_node to Q
@@ -422,9 +472,9 @@ def rollout(
             )
             is_success = b_final >= 0
             success_indices = goal_indices[is_success]
-            success[success_indices] = 1
+            failures[success_indices] = 0
 
         # update indices
         indices = indices[~is_goal]
 
-    return Q, success
+    return Q, failures
