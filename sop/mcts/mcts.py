@@ -144,7 +144,7 @@ def increase_visit_count(
     tree.node_visits[indices, node_index] += 1
 
     # Can only update nodes who have parents, so need to mask
-    has_parent = depth != 0
+    has_parent = depth[indices] != 0
     indices = indices[has_parent]
     node_index = node_index[has_parent]
 
@@ -204,7 +204,7 @@ def simulate(
         # 2. node has been expanded -> traverse find best neighbor
         depth[indices] += 1
         is_visited = next_neighbor != Tree.UNVISITED
-        is_before_depth_cutoff = depth < max_depth
+        is_before_depth_cutoff = depth[indices] < max_depth
         is_continuing = torch.logical_and(is_visited, is_before_depth_cutoff)
 
         # mask out indices and add expanded next_neighbors to state
@@ -311,18 +311,22 @@ def expand(
     return leaf_node
 
 
+# TODO: Clean up...
 def backup(tree: Tree, graph: Graph, leaf_node: torch.Tensor, p_f: float = 0.1):
     batch_size, _ = tree_lib.infer_tree_shape(tree)
-    indices = torch.arange(batch_size)
+    indices = torch.arange(batch_size)  # [B,]
 
-    vj = leaf_node
-    vj_mapping = tree.neighbor_from_parent[indices, vj]
-    vi = tree.parents[indices, vj]
-    vk = tree.parents[indices, vj]
+    vj = leaf_node  # [B,]
+    vi = tree.parents[indices, vj]  # [B,]
+    vk = tree.parents[indices, vi]  # [B,]
 
     # check if v_k is null
     has_parent = vk != Tree.NO_PARENT
-    indices = indices[has_parent]
+    # mask values
+    indices = indices[has_parent]  # [I,]
+    vj = vj[has_parent]  # [I,]
+    vi = vi[has_parent]  # [I,]
+    vk = vk[has_parent]  # [I,]
 
     while indices.numel() > 0:
         vi_mapping = tree.neighbor_from_parent[indices, vi]
@@ -330,6 +334,7 @@ def backup(tree: Tree, graph: Graph, leaf_node: torch.Tensor, p_f: float = 0.1):
         vi_f = tree.children_failure_probs[indices, vk, vi_mapping]
         vi_r = graph.rewards[indices, vi_mapping]
 
+        vj_mapping = tree.neighbor_from_parent[indices, leaf_node[indices]]
         vj = tree.children_index[indices, vi, vj_mapping]
         vj_q = tree.children_values[indices, vi, vj_mapping]
         vj_f = tree.children_failure_probs[indices, vi, vj_mapping]
@@ -340,40 +345,41 @@ def backup(tree: Tree, graph: Graph, leaf_node: torch.Tensor, p_f: float = 0.1):
         # condition 1
         # if vk.F[vi] < Pf
         a = vi_f < p_f
-        a_i = indices[a]
         #   if vi.F[vj] < Pf
-        b = vj_f[a_i] < p_f
-        b_i = a_i[b]
+        b = vj_f < p_f
         #     if vk.Q[vi] < vi.Q[vj] + r(vi)
-        c = vi_q[b_i] < new_q[b_i]
-        c_i = b_i[c]
+        c = vi_q < new_q
+
+        cond1 = a.logical_and(b).logical_and(c)
 
         # condition 2
         # else if vk.F[vi] > vi.F[vj]
-        not_a = ~a
-        d = vi_f[not_a] > new_f[not_a]
-        d_i = indices[not_a][d]
+        cond2 = vi_f > new_f
 
-        valid_i = torch.concat([c_i, d_i])
+        # if condition 1 or condition 2
+        valid = torch.logical_or(cond1, cond2)
+        valid_i = indices[valid]
 
-        # condition #1 and #2
         if valid_i.numel() > 0:
-            valid_vk = vk[valid_i]
-            valid_vi = vi[valid_i]
-            valid_vi_mapping = vi_mapping[valid_i]
-            new_q = new_q[valid_i]
-            new_f = new_f[valid_i]
+            valid_vk = vk[valid]
+            valid_vi = vi[valid]
+            valid_vi_mapping = vi_mapping[valid]
+            new_q = new_q[valid]
+            new_f = new_f[valid]
+
             tree.node_values[valid_i, valid_vi] = new_q
             tree.children_values[valid_i, valid_vk, valid_vi_mapping] = new_q
             tree.failure_probs[valid_i, valid_vi] = new_f
             tree.children_failure_probs[valid_i, valid_vk, valid_vi_mapping] = new_f
 
         # update values
-        vi = vk
+        vi = tree.parents[indices, vi]
         vk = tree.parents[indices, vk]
 
         has_parent = vk != Tree.NO_PARENT
         indices = indices[has_parent]
+        vi = vi[has_parent]
+        vk = vk[has_parent]
 
 
 # @torch.compile(dynamic=True)
