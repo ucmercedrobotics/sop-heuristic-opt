@@ -12,7 +12,7 @@ from sop.mcts.mcts import run
 def main(cfg: DictConfig) -> None:
     # print(OmegaConf.to_yaml(cfg))
     # TODO: Add configuration to hydra config.yaml
-    BATCH_SIZE = 10
+    BATCH_SIZE = 64
     NUM_SIMULATIONS = 350
     NUM_NODES = 20
     BUDGET = 2.0

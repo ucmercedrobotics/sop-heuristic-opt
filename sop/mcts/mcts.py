@@ -76,7 +76,7 @@ def MCTS_SOPCC(
         parent_node, leaf_node_index, depth, path_from_root = simulate(
             tree, graph, current_path, max_depth=num_simulations
         )
-        Q, F = rollouts(
+        Q, F = rollout(
             graph, heuristic, goal_node, path_from_root, leaf_node_index, budget, 100
         )
         leaf_node = expand(tree, parent_node, leaf_node_index, Q, F)
@@ -376,49 +376,6 @@ def backup(tree: Tree, graph: Graph, leaf_node: torch.Tensor, p_f: float = 0.1):
         indices = indices[has_parent]
 
 
-def rollouts(
-    graph: Graph,
-    heuristic: Heuristic,
-    goal_node: torch.Tensor,
-    path_from_root: Path,
-    leaf_node: torch.Tensor,
-    budget: torch.Tensor,
-    S: int = 2,
-    p_r: float = 0.1,
-    p_f: float = 0.1,
-    kappa: float = 0.5,
-):
-    # infer shape
-    batch_size, _ = graph_lib.infer_graph_shape(graph)
-
-    # Precompute traversal costs
-    ts = sample_traverse_cost(path_from_root, samples=S, kappa=kappa)
-    new_budget = budget.unsqueeze(-1) - ts
-
-    # Buffer for Q and F
-    Q = torch.zeros((batch_size,))
-    F = torch.zeros((batch_size,))
-
-    for s in range(S):
-        B_prime = new_budget[:, s]
-        q, f = rollout(
-            graph,
-            heuristic,
-            goal_node,
-            path_from_root,
-            leaf_node,
-            B_prime,
-            p_r,
-            p_f,
-            kappa,
-        )
-        Q += q
-        F += f
-
-    # return average value and failure prob
-    return Q / S, F / S
-
-
 # @torch.compile(dynamic=True)
 def select_random(distribution):
     return torch.multinomial(distribution, num_samples=1).squeeze()
@@ -440,116 +397,171 @@ def rollout(
     goal_node: torch.Tensor,
     path_from_root: Path,
     leaf_node: torch.Tensor,
-    B_prime: torch.Tensor,
+    budget: torch.Tensor,
+    S: int = 100,
     p_r: float = 0.1,
     p_f: float = 0.1,
     kappa: float = 0.5,
 ):
-    batch_size, _ = graph_lib.infer_graph_shape(graph)
+    batch_size, num_nodes = graph_lib.infer_graph_shape(graph)
+    sim_shape = (batch_size, S)
+    mask_shape = (batch_size, S, num_nodes)
+    flatten_shape = (batch_size * S,)
+
+    # Precompute traversal costs
+    ts = sample_traverse_cost(path_from_root, samples=S, kappa=kappa)
+    sampled_budgets = budget.unsqueeze(-1) - ts  # [B, S]
+
+    # -- S simulations in batch
+    # - 1. broadcast to [B, S]
+    # - 2. flatten to [B*S,]
 
     # Buffer for q and success
-    Q = torch.zeros((batch_size,))
-    failures = torch.ones((batch_size,))
+    Q = torch.zeros(sim_shape).flatten()  # [B*S]
+    failures = torch.ones(sim_shape).flatten()  # [B*S]
 
-    # mask for greedy, distribution for random
-    mask = path_from_root.mask.clone()
-    distribution = (~mask).float()
+    # masks
+    # - greedy is used with torch.argmax, so it should be T for visited
+    # - random is used with torch.multinomial, so it should be 0 for visited
+    greedy_mask = path_from_root.mask.clone()  # [B, N]
+    random_mask = (~greedy_mask).float()  # [B, N]
+    # broadcast to S
+    # [B, 1, N] -> [B, S, N] -> [B*S, N]
+    greedy_mask = (
+        greedy_mask.unsqueeze(-2)
+        .broadcast_to(mask_shape)
+        .reshape((batch_size * S, num_nodes))
+    )
+    random_mask = (
+        random_mask.unsqueeze(-2)
+        .broadcast_to(mask_shape)
+        .reshape((batch_size * S, num_nodes))
+    )
 
     # loop state
-    current_node = leaf_node.clone()
-    simulated_budget = B_prime.clone()
-    indices = torch.arange(batch_size)
+    current_nodes = leaf_node.unsqueeze(-1).broadcast_to(sim_shape).flatten()  # [B*S]
+    simulated_budgets = sampled_budgets.flatten()  # [B*S]
+
+    # We need two sets of indices.
+    # batch_indices will query batch-level resources, like graph rewards and edge weights
+    batch_indices = (
+        torch.arange(batch_size).unsqueeze(-1).broadcast_to(sim_shape).flatten()
+    )  # [B*S]
+    # sim_indices will query simulation level resources, like simulated_budget and masks
+    sim_indices = torch.arange(batch_size * S)  # [B*S]
 
     # Add reward of leaf_node to Q
-    Q += graph.rewards[indices, current_node]
+    Q += graph.rewards[batch_indices, current_nodes]  # [B,]
 
-    while indices.numel() > 0:
+    while sim_indices.numel() > 0:
         # 0: create new_nodes buffer
-        new_nodes = torch.full(size=(batch_size,), fill_value=-1, dtype=torch.long)
+        new_nodes = torch.full(
+            size=flatten_shape, fill_value=-1, dtype=torch.long
+        )  # [B, S]
 
         # 1: choose either random or greedy based on p_r
-        p = torch.rand(size=indices.shape)
+        p = torch.rand(size=sim_indices.shape)
         choose_random = p < p_r
-        random_indices = indices[choose_random]
-        greedy_indices = indices[~choose_random]
+        choose_greedy = ~choose_random
+
+        b_rand_indices, s_rand_indices = (
+            batch_indices[choose_random],
+            sim_indices[choose_random],
+        )
+        b_greedy_indices, s_greedy_indices = (
+            batch_indices[choose_greedy],
+            sim_indices[choose_greedy],
+        )
 
         # 2a: if p < p_r, select random
-        if random_indices.numel() > 0:
-            d = distribution[random_indices]
+        if s_rand_indices.numel() > 0:
+            d = random_mask[s_rand_indices]
             random_nodes = select_random(d)
-            new_nodes[random_indices] = random_nodes
+            new_nodes[s_rand_indices] = random_nodes
 
         # 2b: else p >= p_r select greedy
-        if greedy_indices.numel() > 0:
-            m = mask[greedy_indices]
-            c = current_node[greedy_indices]
-            s = heuristic.scores[greedy_indices, c]
+        if s_greedy_indices.numel() > 0:
+            m = greedy_mask[s_greedy_indices]
+            c = current_nodes[s_greedy_indices]
+            s = heuristic.scores[b_greedy_indices, c]
             greedy_nodes = select_greedy(s, m)
-            new_nodes[greedy_indices] = greedy_nodes
+            new_nodes[s_greedy_indices] = greedy_nodes
 
         # 4: if new != goal, calculate failure_prob of continuing nodes
-        is_cont = new_nodes[indices] != goal_node[indices]
-        cont_indices = indices[is_cont]
+        is_cont = new_nodes[sim_indices] != goal_node[batch_indices]
+        b_cont_indices, s_cont_indices = batch_indices[is_cont], sim_indices[is_cont]
 
-        if cont_indices.numel() > 0:
+        if s_cont_indices.numel() > 0:
             # 4a: compute failure probability
-            c = current_node[indices]
-            n = new_nodes[indices]
-            g = goal_node[indices]
-            b = simulated_budget[indices]
-            sample_c_n = heuristic.samples[cont_indices, c, n]
-            sample_n_g = heuristic.samples[cont_indices, n, g]
+            c = current_nodes[s_cont_indices]
+            n = new_nodes[s_cont_indices]
+            g = goal_node[b_cont_indices]
+            b = simulated_budgets[s_cont_indices]
+            sample_c_n = heuristic.samples[b_cont_indices, c, n]
+            sample_n_g = heuristic.samples[b_cont_indices, n, g]
             total_sample_cost = sample_c_n + sample_n_g
             failure_prob = compute_failure_prob(total_sample_cost, b)
 
             # 4b: determine whether continuing node failed or succeeded
             below_failure = failure_prob <= p_f
-            suc_indices = cont_indices[below_failure]
+            b_suc_indices, s_suc_indices = (
+                b_cont_indices[below_failure],
+                s_cont_indices[below_failure],
+            )
 
             # 4c: if Pr[...] <= p_f, add to path
-            if suc_indices.numel() > 0:
-                c = current_node[suc_indices]
-                n = new_nodes[suc_indices]
+            if s_suc_indices.numel() > 0:
+                c = current_nodes[s_suc_indices]
+                n = new_nodes[s_suc_indices]
                 # sample cost
-                w = graph.dists[suc_indices, c, n]
-                simulated_budget[suc_indices] -= sample_cost(
+                w = graph.dists[b_suc_indices, c, n]
+                simulated_budgets[s_suc_indices] -= sample_cost(
                     w, num_samples=1, kappa=kappa
                 ).squeeze()
                 # add reward
-                Q[suc_indices] += graph.rewards[suc_indices, n]
+                Q[s_suc_indices] += graph.rewards[b_suc_indices, n]
                 # change current_node
-                current_node[suc_indices] = n
+                current_nodes[s_suc_indices] = n
 
             # 4d: always update mask
-            c = new_nodes[cont_indices]
-            mask[cont_indices, c] = 1
-            distribution[cont_indices, c] = 0
+            c = new_nodes[s_cont_indices]
+            greedy_mask[s_cont_indices, c] = 1
+            random_mask[s_cont_indices, c] = 0
 
             # 4e: if all nodes have been visited, go to goal and return
-            all_visited = torch.sum(distribution[cont_indices], dim=-1) == 0
-            complete_indices = cont_indices[all_visited]
-            new_nodes[complete_indices] = goal_node[complete_indices]
+            all_visited = torch.sum(random_mask[s_cont_indices], dim=-1) == 0
+            b_comp_indices, s_comp_indices = (
+                b_cont_indices[all_visited],
+                s_cont_indices[all_visited],
+            )
+            new_nodes[s_comp_indices] = goal_node[b_comp_indices]
 
         # 7: else new == goal, add to path and return
-        is_goal = new_nodes[indices] == goal_node[indices]
-        goal_indices = indices[is_goal]
+        is_goal = new_nodes[sim_indices] == goal_node[batch_indices]
+        b_goal_indices, s_goal_indices = batch_indices[is_goal], sim_indices[is_goal]
 
-        if goal_indices.numel() > 0:
-            c = current_node[goal_indices]
-            n = new_nodes[goal_indices]
+        if s_goal_indices.numel() > 0:
+            c = current_nodes[s_goal_indices]
+            n = new_nodes[s_goal_indices]
             # add reward
-            Q[goal_indices] += graph.rewards[goal_indices, n]
+            Q[s_goal_indices] += graph.rewards[b_goal_indices, n]
             # Determine failure or success
-            w = graph.dists[goal_indices, c, n]
+            w = graph.dists[b_goal_indices, c, n]
             b_final = (
-                B_prime[goal_indices]
+                simulated_budgets[s_goal_indices]
                 - sample_cost(w, num_samples=1, kappa=kappa).squeeze()
             )
             is_success = b_final >= 0
-            success_indices = goal_indices[is_success]
+            success_indices = s_goal_indices[is_success]
             failures[success_indices] = 0
 
         # update indices
-        indices = indices[~is_goal]
+        is_cont = ~is_goal
+        batch_indices, sim_indices = batch_indices[is_cont], sim_indices[is_cont]
+
+    # [B*S,] -> [B,S]
+    # average Q and f over S runs
+    Q = Q.reshape(sim_shape).sum(dim=-1) / S
+    failures = failures.reshape(sim_shape).sum(dim=-1) / S
 
     return Q, failures
