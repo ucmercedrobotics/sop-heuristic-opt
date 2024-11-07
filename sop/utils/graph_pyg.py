@@ -23,15 +23,21 @@ def generate_random_graph(num_nodes: int) -> Data:
     # [2, N] to [N, 2]
     positions = positions.T
 
-    data = Data(pos=positions)
+    data = Data(pos=positions).to("cpu")
     data.reward = rewards
 
     # For a normalized graph, the maximum distance is sqrt(2) (when points are (0,0) and (1,1))
     max_distance = (2**0.5) + 1e-5
+    # max_distance = 2
 
     # 1. RadiusGraph to create a complete graph
     # 2. Distance to compute euclidean distance for every edge
-    transform = T.Compose([T.RadiusGraph(r=max_distance), T.Distance(norm=False)])
+    transform = T.Compose(
+        [
+            T.RadiusGraph(r=max_distance, max_num_neighbors=num_nodes),
+            T.Distance(norm=False),
+        ]
+    )
     data = transform(data)
     return data, rewards, positions
 
@@ -103,7 +109,7 @@ def infer_graph_shape(graph: Graph):
 if __name__ == "__main__":
     import time
 
-    N = 20  # num_nodes
+    N = 100  # num_nodes
     B = 256  # batch_size
 
     # Single

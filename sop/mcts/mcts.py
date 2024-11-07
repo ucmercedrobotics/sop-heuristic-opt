@@ -19,6 +19,7 @@ def run(
     goal_node: torch.Tensor,
     budget: torch.Tensor,
     num_simulations: int,
+    num_rollouts: int,
 ):
     """Main SOP function.
     Takes in original Graph, starting node id, ending node id, and budget.
@@ -42,7 +43,14 @@ def run(
     # {
     # with torch.no_grad():
     result = MCTS_SOPCC(
-        graph, heuristic, goal_node, path, current_node, budget, num_simulations
+        graph,
+        heuristic,
+        goal_node,
+        path,
+        current_node,
+        budget,
+        num_simulations,
+        num_rollouts,
     )
     # move to vertex next_v in graph state
     # sampled_cost = incurred cost
@@ -58,6 +66,7 @@ def run(
     return None
 
 
+# TODO: Issue with select, issue with rollout budget.
 def MCTS_SOPCC(
     graph: Graph,
     heuristic: Heuristic,
@@ -66,22 +75,32 @@ def MCTS_SOPCC(
     current_node: torch.Tensor,
     budget: torch.Tensor,
     num_simulations: int,
+    num_rollouts: int,
 ):
     # Create new MCTS tree
     tree = instantiate_tree_from_root(current_node, graph, num_simulations)
     for k in range(num_simulations):
-        start = time.time()
-        # For K iterations
-        # Select new child vertex with UCTF
-        parent_node, leaf_node_index, depth, path_from_root = simulate(
+        start_all = time.time()
+        # start = time.time()
+        parent_node, leaf_node_index, depth, path_from_root = select(
             tree, graph, current_path, max_depth=num_simulations
         )
+        # print(f"select: {time.time() - start}")
+        # start = time.time()
         Q, F = rollout(
-            graph, heuristic, goal_node, path_from_root, leaf_node_index, budget, 100
+            graph,
+            heuristic,
+            goal_node,
+            path_from_root,
+            leaf_node_index,
+            budget,
+            S=num_rollouts,
         )
+        # print(f"rollout: {time.time() - start}")
         leaf_node = expand(tree, parent_node, leaf_node_index, Q, F)
         backup(tree, graph, leaf_node)
-        print(f"{k}: {time.time() - start}")
+        # TODO: backupN
+        print(f"{k}: {time.time() - start_all}")
     return None
 
 
@@ -156,7 +175,7 @@ def increase_visit_count(
 
 # TODO: Add contiguous?
 # TODO: Add masking for same node
-def simulate(
+def select(
     tree: Tree, graph: Graph, current_path: Path, max_depth: int, z: float = 0.1
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Select the next leaf node to expand using the tree policy."""
@@ -284,6 +303,7 @@ def expand(
         tree.children_index[ui, p, l] = new_idx
         tree.children_values[ui, p, l] = q
         tree.children_failure_probs[ui, p, l] = f
+        tree.children_visits[ui, p, l] += 1
 
         tree.num_nodes[ui] += 1
 
@@ -303,6 +323,7 @@ def expand(
         tree.node_visits[ui, new_idx] += 1  # TODO: Do we need this?
         tree.children_values[ui, p, l] = q
         tree.children_failure_probs[ui, p, l] = f
+        tree.children_visits[ui, p, l] += 1
 
     leaf_node = torch.zeros((batch_size,), dtype=torch.long)
     leaf_node[ui] = new_idx
@@ -445,7 +466,9 @@ def rollout(
     )
 
     # loop state
-    current_nodes = leaf_node.unsqueeze(-1).broadcast_to(sim_shape).flatten()  # [B*S]
+    current_nodes = (
+        leaf_node.clone().unsqueeze(-1).broadcast_to(sim_shape).flatten()
+    )  # [B*S]
     simulated_budgets = sampled_budgets.flatten()  # [B*S]
 
     # We need two sets of indices.
@@ -519,13 +542,15 @@ def rollout(
             if s_suc_indices.numel() > 0:
                 c = current_nodes[s_suc_indices]
                 n = new_nodes[s_suc_indices]
-                # sample cost
+                # sample cost and subtract
                 w = graph.dists[b_suc_indices, c, n]
-                simulated_budgets[s_suc_indices] -= sample_cost(
-                    w, num_samples=1, kappa=kappa
-                ).squeeze()
+                sampled_cost = sample_cost(w, num_samples=1, kappa=kappa).squeeze()
+                if sampled_cost.dim() == 0:
+                    sampled_cost.unsqueeze_(0)
+                simulated_budgets.index_add_(0, s_suc_indices, -sampled_cost)
+                simulated_budgets.index_add_(0, s_suc_indices, -sampled_cost)
                 # add reward
-                Q[s_suc_indices] += graph.rewards[b_suc_indices, n]
+                Q.index_add_(0, s_suc_indices, graph.rewards[b_suc_indices, n])
                 # change current_node
                 current_nodes[s_suc_indices] = n
 
@@ -550,7 +575,7 @@ def rollout(
             c = current_nodes[s_goal_indices]
             n = new_nodes[s_goal_indices]
             # add reward
-            Q[s_goal_indices] += graph.rewards[b_goal_indices, n]
+            Q.index_add_(0, s_goal_indices, graph.rewards[b_goal_indices, n])
             # Determine failure or success
             w = graph.dists[b_goal_indices, c, n]
             b_final = (
