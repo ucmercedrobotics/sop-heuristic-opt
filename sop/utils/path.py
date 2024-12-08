@@ -1,7 +1,7 @@
 from typing import ClassVar
 from dataclasses import dataclass
 import torch
-from sop.utils.graph_pyg import Graph, infer_graph_shape
+from sop.utils.graph_torch import Graph, infer_graph_shape
 
 
 @dataclass

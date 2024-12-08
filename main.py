@@ -3,18 +3,20 @@ import hydra
 from omegaconf import DictConfig, OmegaConf
 import torch
 
-from sop.utils.graph_pyg import generate_random_graph_batch, get_bytes
+from sop.utils.graph_torch import generate_random_graph_batch, get_bytes
 from sop.utils.perf import profile
 from sop.mcts.mcts import run
+
+# TODO: Travelling salesman
 
 
 @hydra.main(version_base=None, config_path="config", config_name="config")
 def main(cfg: DictConfig) -> None:
     # print(OmegaConf.to_yaml(cfg))
     # TODO: Add configuration to hydra config.yaml
-    BATCH_SIZE = 1
+    BATCH_SIZE = 1024
     NUM_SIMULATIONS = 350
-    NUM_ROLLOUTS = 100
+    NUM_ROLLOUTS = 1
     NUM_NODES = 20
     BUDGET = 2
     START_NODE = 1

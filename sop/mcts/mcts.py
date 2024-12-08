@@ -2,7 +2,7 @@ import torch
 from torch_geometric.data import Data, Batch
 import time
 
-import sop.utils.graph_pyg as graph_lib
+import sop.utils.graph_torch as graph_lib
 import sop.utils.path as path_lib
 import sop.mcts.tree as tree_lib
 import sop.utils.heuristic as heuristic_lib
@@ -590,7 +590,7 @@ def rollout(
         is_cont = ~is_goal
         batch_indices, sim_indices = batch_indices[is_cont], sim_indices[is_cont]
 
-    # [B*S,] -> [B,S]
+    # [B*S,] -> [B,S] -> [B,]
     # average Q and f over S runs
     Q = Q.reshape(sim_shape).sum(dim=-1) / S
     failures = failures.reshape(sim_shape).sum(dim=-1) / S
