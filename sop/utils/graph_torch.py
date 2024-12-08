@@ -7,6 +7,10 @@ class TorchGraph:
     nodes: TensorDict
     edge_matrix: torch.Tensor
 
+    def size(self):
+        "Returns size of graph as (batch_size, num_nodes)"
+        return self.edge_matrix.size(0), self.edge_matrix.size(-1)
+
 
 def generate_random_graph_batch(
     batch_size: int, num_nodes: int, device: str = "cpu"
@@ -60,3 +64,8 @@ if __name__ == "__main__":
     G = generate_random_graph_batch(B, N)
     batch_time = time.time() - start
     print(f"Time elapsed batched2: {batch_time}")
+
+    start = time.time()
+    for _ in range(1):
+        indices = torch.arange(20)
+    print(f"Time elapsed arange: {time.time() - start}")
