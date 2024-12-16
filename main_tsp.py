@@ -11,14 +11,14 @@ from sop.gnn.gat import DenseGAT
 
 def main():
     # -- Config
-    batch_size = 10
-    num_nodes = 20
+    batch_size = 256
+    num_nodes = 100
     device = "cpu"
     start_node = 2
     num_simulations = 50
 
     # -- Create GNN
-    dense_gat = DenseGAT(in_channels=9, hidden_channels=128, out_channels=128, heads=2)
+    dense_gat = DenseGAT(in_channels=7, hidden_channels=128, out_channels=128, heads=2)
 
     # -- Create a Batch of Graphs
     start = time.time()
@@ -27,8 +27,13 @@ def main():
     print(f"Created graphs: {time.time() - start}")
 
     # -- Generate Path w/ Solver
+    # TODO: Make sure select works properly
+    # TODO: I need to make sure the backup works properly
+    # TODO: THERE IS A MEMORY LEAK WITH THE GNN UGH; UPDATE: I needed a torch.no_grad()
+    # TODO: Mask out nodes, you don't need to compute everything... (it might actually be possible with torch_geometric...)
     start = time.time()
-    mcts_paths = run_tsp_solver(graphs, dense_gat, start_nodes, num_simulations)
+    with torch.no_grad():
+        mcts_paths = run_tsp_solver(graphs, dense_gat, start_nodes, num_simulations)
     print(f"Solved TSP with mcts: {time.time() - start}")
 
     # -- Generate Path w/ solve_tsp

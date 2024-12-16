@@ -1,23 +1,18 @@
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 import time
 
-import torch_geometric
-import torch_geometric.transforms as T
 import torch_geometric.nn as gnn
-from torch_geometric.utils import dense_to_sparse
 
 from sop.utils.graph_torch import generate_random_graph_batch
 from sop.utils.path2 import Path
-from sop.mcts.mcts_tsp import preprocess_features
+from sop.mcts.mcts_tsp import preprocess_features, preprocess_mask
 from sop.gnn.gat import DenseGAT
 
 
 def main():
     # -- Config
-    batch_size = 1000
-    num_nodes = 20
+    batch_size = 256
+    num_nodes = 100
     device = "cpu"
     start_node = 2
 
@@ -33,16 +28,16 @@ def main():
         current_graph_node,
         cost=torch.zeros(batch_size, device=device),
     )
+    dense_gat = DenseGAT(in_channels=7, hidden_channels=128, out_channels=128, heads=2)
 
-    dense_gat = DenseGAT(in_channels=9, hidden_channels=128, out_channels=128, heads=2)
-
-    node_features = preprocess_features(graphs, tree_path, current_graph_node)
+    mask = preprocess_mask(tree_path, current_graph_node, current_graph_node)
+    node_features = preprocess_features(graphs, current_graph_node, current_graph_node)
     edge_matrix = graphs.edge_matrix
     print(gnn.summary(dense_gat, node_features, edge_matrix))
 
     start = time.time()
-    x = dense_gat(node_features, edge_matrix)
-    print(f"Inference time: {time.time() - start}")
+    x = dense_gat(node_features, edge_matrix, mask)
+    print(f"Time elapsed: {time.time() - start}")
     print(x.shape)
 
 

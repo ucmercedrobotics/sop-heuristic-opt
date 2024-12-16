@@ -1,11 +1,6 @@
-import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import time
-
-import torch_geometric
-import torch_geometric.transforms as T
 import torch_geometric.nn as gnn
+import torch.nn.functional as F
 
 
 class DenseGAT(nn.Module):
@@ -21,9 +16,9 @@ class DenseGAT(nn.Module):
             nn.Linear(in_features=out_channels, out_features=1),
         )
 
-    def forward(self, x, edge_matrix):
-        x = F.relu(self.conv1(x, edge_matrix))
-        x = F.relu(self.conv2(x, edge_matrix))
-        x = self.conv3(x, edge_matrix)
+    def forward(self, x, edge_matrix, mask=None):
+        x = F.relu(self.conv1(x, edge_matrix, mask))
+        x = F.relu(self.conv2(x, edge_matrix, mask))
+        x = self.conv3(x, edge_matrix, mask)
         x = self.mlp(x).squeeze()
         return x

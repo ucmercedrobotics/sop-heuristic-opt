@@ -32,7 +32,7 @@ class Path:
         self.nodes[indices, index] = node
         self.costs[indices, index] = cost
         self.mask[indices, node] = 1
-        self.length += 1
+        self.length[indices] += 1
 
     def pop(self, indices):
         self.length -= 1

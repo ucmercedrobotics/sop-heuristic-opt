@@ -1,11 +1,11 @@
+from collections import defaultdict
 import time
 import torch
 import torch.nn.functional as F
-from tensordict import tensorclass, TensorDict
+from tensordict import tensorclass
 
 from sop.utils.graph_torch import TorchGraph
 from sop.utils.path2 import Path
-from sop.gnn.gat import DenseGAT
 
 
 def run_tsp_solver(
@@ -26,7 +26,7 @@ def run_tsp_solver(
     path.append(
         indices,
         current_graph_node,
-        cost=torch.zeros(batch_size, device=device),
+        cost=torch.zeros_like(current_graph_node, dtype=torch.float32),
     )
 
     # Create tree buffer
@@ -102,24 +102,26 @@ def MCTS_TSP2(
     num_simulations: int,
     z: float = 0.1,
 ):
-    tree.reset(current_graph_node)
+    # TODO: Fix bug with reset
+    # tree.reset(current_graph_node)
+    tree = Tree.instantiate_from_root(current_graph_node, graph, num_simulations)
 
     for k in range(num_simulations):
         # start = time.time()
         parent_tree_node, parent_graph_node, tree_path, is_expanded, depth = select_gnn(
             tree, graph, current_path, z=z
         )
-        # print(f"Select: {time.time() - start}")
-        # start = time.time()
+        # print(f"{k} - Select: {time.time() - start}")
+        start = time.time()
         Q = policy_gnn(graph, gnn, tree_path, parent_graph_node, goal_graph_node)
-        # print(f"Policy: {time.time() - start}")
+        print(f"{k} - Policy: {time.time() - start}")
         # start = time.time()
         # expand_gnn(tree, tree_path, parent_tree_node, Q, is_expanded, depth)
         expand_batch_gnn(tree, tree_path, parent_tree_node, Q, is_expanded, depth)
-        # print(f"Expand: {time.time() - start}")
+        # print(f"{k} - Expand: {time.time() - start}")
         # start = time.time()
         backup_gnn(tree, tree_path, graph, parent_tree_node)
-        # print(f"Backup: {time.time() - start}")
+        # print(f"{k} - Backup: {time.time() - start}")
 
     return select_action(tree, tree_path)
 
@@ -298,27 +300,36 @@ def select_gnn(tree: Tree, graph: TorchGraph, current_path: Path, z: float = 0.1
     return parent_tree_node, parent_graph_node, tree_path, is_expanded, depth
 
 
-def preprocess_features(
-    graph: TorchGraph,
+def preprocess_mask(
     tree_path: Path,
     current_graph_node: torch.Tensor,
     goal_graph_node: torch.Tensor,
 ):
-    batch_size, _ = graph.size()
+    batch_size, _ = tree_path.size()
+    indices = torch.arange(batch_size)
+    mask = ~tree_path.mask
+    mask[indices, current_graph_node] = True
+    mask[indices, goal_graph_node] = True
+    return mask
+
+
+def preprocess_features(
+    graph: TorchGraph,
+    current_graph_node: torch.Tensor,
+    goal_graph_node: torch.Tensor,
+):
+    batch_size, num_nodes = graph.size()
     indices = torch.arange(batch_size)
 
     # -- Node features
     position = graph.nodes["position"]  # [B, N, 2]
     reward = graph.nodes["reward"]  # [B, N]
 
-    visited = tree_path.mask.long()
-    visited_one_hot = F.one_hot(visited, num_classes=2)  # [B, N, 2]
-
-    current = torch.zeros_like(visited)
+    current = torch.zeros((batch_size, num_nodes), dtype=torch.long)
     current[indices, current_graph_node] = 1
     current_one_hot = F.one_hot(current, num_classes=2)  # [B, N, 2]
 
-    goal = torch.zeros_like(visited)
+    goal = torch.zeros(batch_size, num_nodes, dtype=torch.long)
     goal[indices, goal_graph_node] = 1
     goal_one_hot = F.one_hot(goal, num_classes=2)  # [B, N, 2]
 
@@ -326,12 +337,12 @@ def preprocess_features(
         [
             position,
             reward.unsqueeze(-1),
-            visited_one_hot,
             current_one_hot,
             goal_one_hot,
         ],
         dim=-1,
-    )
+    )  # [B, N, 7]
+
     return node_features
 
 
@@ -342,12 +353,9 @@ def policy_gnn(
     current_graph_node: torch.Tensor,
     goal_graph_node: torch.Tensor,
 ):
-    node_features = preprocess_features(
-        graph, tree_path, current_graph_node, goal_graph_node
-    )
-    edge_matrix = graph.edge_matrix
-
-    Q = gnn(node_features, edge_matrix)
+    mask = preprocess_mask(tree_path, current_graph_node, goal_graph_node)
+    node_features = preprocess_features(graph, current_graph_node, goal_graph_node)
+    Q = gnn(node_features, graph.edge_matrix, mask)
     return Q
 
 
@@ -492,6 +500,7 @@ def expand_batch_gnn(
 
     batch_indices_expanded = batch_indices[are_expanded]
     if batch_indices_expanded.numel() > 0:
+        print("Finally expanded")
         pt = parent_tree_node[batch_indices_expanded]
         g = new_graph_nodes[are_expanded]
         q = Q[batch_indices_expanded, g]
