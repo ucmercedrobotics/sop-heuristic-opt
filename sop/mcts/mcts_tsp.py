@@ -34,15 +34,8 @@ def run_tsp_solver(
         current_graph_node, graph, num_simulations, device
     )
 
-    for step in range(num_nodes + 1):
-        if step < num_nodes:
-            # next_graph_node = MCTS_TSP(
-            #     graph,
-            #     path,
-            #     current_graph_node,
-            #     start_graph_node,
-            #     num_simulations,
-            # )
+    for step in range(num_nodes):
+        if step < num_nodes - 1:
             next_graph_node = MCTS_TSP2(
                 tree,
                 graph,
@@ -57,7 +50,6 @@ def run_tsp_solver(
 
         cost = graph.edge_matrix[indices, current_graph_node, next_graph_node]
         path.append(indices, next_graph_node, cost)
-
         current_graph_node = next_graph_node
 
     return path
@@ -89,7 +81,7 @@ def MCTS_TSP(
         backup_gnn(tree, tree_path, graph, parent_tree_node)
         # print(f"Backup: {time.time() - start}")
 
-    return select_action(tree, tree_path)
+    return select_action(tree, current_path)
 
 
 def MCTS_TSP2(
@@ -112,9 +104,9 @@ def MCTS_TSP2(
             tree, graph, current_path, z=z
         )
         # print(f"{k} - Select: {time.time() - start}")
-        start = time.time()
+        # start = time.time()
         Q = policy_gnn(graph, gnn, tree_path, parent_graph_node, goal_graph_node)
-        print(f"{k} - Policy: {time.time() - start}")
+        # print(f"{k} - Policy: {time.time() - start}")
         # start = time.time()
         # expand_gnn(tree, tree_path, parent_tree_node, Q, is_expanded, depth)
         expand_batch_gnn(tree, tree_path, parent_tree_node, Q, is_expanded, depth)
@@ -123,7 +115,8 @@ def MCTS_TSP2(
         backup_gnn(tree, tree_path, graph, parent_tree_node)
         # print(f"{k} - Backup: {time.time() - start}")
 
-    return select_action(tree, tree_path)
+    action = select_action(tree, current_path)
+    return action
 
 
 # TODO: Figure out how to add this to tree class
@@ -356,7 +349,8 @@ def policy_gnn(
     mask = preprocess_mask(tree_path, current_graph_node, goal_graph_node)
     node_features = preprocess_features(graph, current_graph_node, goal_graph_node)
     Q = gnn(node_features, graph.edge_matrix, mask)
-    return Q
+    noise = torch.rand_like(Q)
+    return noise
 
 
 def add_node(
@@ -489,31 +483,39 @@ def expand_batch_gnn(
         q = Q[batch_indices_leaf, ng]
 
         tree.node_mapping[batch_indices_leaf, nt] = ng
-        tree.raw_values[batch_indices_leaf, nt] = q
-        tree.node_visits[batch_indices_leaf, nt] = 1
         tree.neighbor_from_parent[batch_indices_leaf, nt] = ng
         tree.parents[batch_indices_leaf, nt] = pt
-
         tree.children_index[batch_indices_leaf, pt, ng] = nt
+
+        tree.raw_values[batch_indices_leaf, nt] = q
+        tree.node_values[batch_indices_leaf, nt] = q
         tree.children_values[batch_indices_leaf, pt, ng] = q
+
+        tree.node_visits[batch_indices_leaf, nt] = 1
         tree.children_visits[batch_indices_leaf, pt, ng] = 1
 
     batch_indices_expanded = batch_indices[are_expanded]
     if batch_indices_expanded.numel() > 0:
-        print("Finally expanded")
         pt = parent_tree_node[batch_indices_expanded]
         g = new_graph_nodes[are_expanded]
-        q = Q[batch_indices_expanded, g]
         ct = tree.children_index[batch_indices_expanded, pt, g]
 
-        tree.raw_values[batch_indices_expanded, ct] = q
+        # Make incremental mean
+        q = Q[batch_indices_expanded, g]
+        n = tree.node_visits[batch_indices_expanded, ct]
+        prev_q = tree.raw_values[batch_indices_expanded, ct]
+        mean_q = prev_q + ((q - prev_q) / (n + 1))
+
+        tree.raw_values[batch_indices_expanded, ct] = mean_q
+        tree.node_values[batch_indices_expanded, ct] = mean_q
+        tree.children_values[batch_indices_expanded, pt, g] = mean_q
+
         tree.node_visits[batch_indices_expanded, ct] += 1
-        tree.children_values[batch_indices_expanded, pt, g] = q
-        tree.children_visits[batch_indices_expanded, pt, g] += q
+        tree.children_visits[batch_indices_expanded, pt, g] += 1
 
     tree.num_nodes += num_graph_nodes
 
-    num_visits = torch.sum(mask, axis=-1)
+    num_visits = torch.sum(mask, axis=-1) - 1
     update_visit_count(
         torch.arange(batch_size), tree, parent_tree_node, depth, num_visits
     )
@@ -529,7 +531,7 @@ def backup_gnn(
     indices = torch.arange(batch_size)
 
     # -- Get values
-    parent_Q = tree.raw_values[indices, current_tree_node]
+    parent_Q = tree.node_values[indices, current_tree_node]
     children_Q = tree.children_values[indices, current_tree_node]
 
     # -- Find smallest cost child
@@ -577,15 +579,17 @@ def backup_gnn(
             )
 
             # Update Loop State
-            parent_tree_node = sec_parent_tree_node
-            parent_Q = tree.raw_values[indices, parent_tree_node]
-            sec_parent_tree_node = tree.parents[indices, sec_parent_tree_node]
             child_graph_node = parent_graph_node
             child_Q = new_estimate
+            parent_tree_node = sec_parent_tree_node
+            parent_graph_node = tree.node_mapping[indices, sec_parent_tree_node]
+            parent_Q = tree.node_values[indices, sec_parent_tree_node]
+            sec_parent_tree_node = tree.parents[indices, sec_parent_tree_node]
 
 
 def select_action(tree: Tree, tree_path: Path):
-    scores = tree.children_values[:, ROOT_INDEX]
+    batch_size = tree.size()[0]
+    scores = tree.children_values[torch.arange(batch_size), ROOT_INDEX]
     scores = torch.masked_fill(scores, tree_path.mask, torch.inf)
     next_graph_node = torch.argmin(scores, axis=-1)
 

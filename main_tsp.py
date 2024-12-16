@@ -7,14 +7,15 @@ from sop.utils.graph_torch import generate_random_graph_batch
 from sop.mcts.mcts_tsp import run_tsp_solver
 from sop.utils.visualization import plot_solution
 from sop.gnn.gat import DenseGAT
+from sop.utils.replay_buffer import compute_value_targets
 
 
 def main():
     # -- Config
-    batch_size = 256
-    num_nodes = 100
+    batch_size = 2
+    num_nodes = 20
     device = "cpu"
-    start_node = 2
+    start_node = 0
     num_simulations = 50
 
     # -- Create GNN
@@ -27,7 +28,7 @@ def main():
     print(f"Created graphs: {time.time() - start}")
 
     # -- Generate Path w/ Solver
-    # TODO: Make sure select works properly
+    # TODO: Make sure select works properly; Definitely doesn't, 0 appears twice for some reason...
     # TODO: I need to make sure the backup works properly
     # TODO: THERE IS A MEMORY LEAK WITH THE GNN UGH; UPDATE: I needed a torch.no_grad()
     # TODO: Mask out nodes, you don't need to compute everything... (it might actually be possible with torch_geometric...)
@@ -61,12 +62,13 @@ def main():
 
     # -- Visualize
     plot_solution(graphs[0], mcts_paths.nodes[0])
-    plot_solution(graphs[0], greedy_paths[0])
+    # plot_solution(graphs[0], greedy_paths[0])
 
     # -- Tree based value targets? benefit would be we get to have more training targets
     # -- Use gumbel for this, muzero reanalyze?
     # The value we need is the remaining cost
     # Q_i = r_i+1 + r_i+2 ... r_i+n
+    compute_value_targets(graphs, mcts_paths)
 
     # -- Add to Replay Buffer
     # -- Train w/ Batch Samples

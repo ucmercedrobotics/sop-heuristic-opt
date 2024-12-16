@@ -13,7 +13,7 @@ class Path:
 
     @classmethod
     def empty(cls, batch_size: int, num_nodes: int, device: str = "cpu"):
-        max_size = (batch_size, num_nodes + 2)
+        max_size = (batch_size, num_nodes + 1)
         mask_size = (batch_size, num_nodes)
         return cls(
             nodes=torch.full(max_size, UNVISITED, dtype=torch.long, device=device),
