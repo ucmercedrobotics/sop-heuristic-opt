@@ -2,10 +2,12 @@ from collections import defaultdict
 import time
 import torch
 import torch.nn.functional as F
-from tensordict import tensorclass
+from tensordict import tensorclass, TensorDict
+from tqdm import tqdm
 
 from sop.utils.graph_torch import TorchGraph
 from sop.utils.path2 import Path
+from sop.gnn.gat import preprocess_features
 
 
 def run_tsp_solver(
@@ -34,7 +36,7 @@ def run_tsp_solver(
         current_graph_node, graph, num_simulations, device
     )
 
-    for step in range(num_nodes):
+    for step in tqdm(range(num_nodes)):
         if step < num_nodes - 1:
             next_graph_node = MCTS_TSP2(
                 tree,
@@ -306,39 +308,6 @@ def preprocess_mask(
     return mask
 
 
-def preprocess_features(
-    graph: TorchGraph,
-    current_graph_node: torch.Tensor,
-    goal_graph_node: torch.Tensor,
-):
-    batch_size, num_nodes = graph.size()
-    indices = torch.arange(batch_size)
-
-    # -- Node features
-    position = graph.nodes["position"]  # [B, N, 2]
-    reward = graph.nodes["reward"]  # [B, N]
-
-    current = torch.zeros((batch_size, num_nodes), dtype=torch.long)
-    current[indices, current_graph_node] = 1
-    current_one_hot = F.one_hot(current, num_classes=2)  # [B, N, 2]
-
-    goal = torch.zeros(batch_size, num_nodes, dtype=torch.long)
-    goal[indices, goal_graph_node] = 1
-    goal_one_hot = F.one_hot(goal, num_classes=2)  # [B, N, 2]
-
-    node_features = torch.cat(
-        [
-            position,
-            reward.unsqueeze(-1),
-            current_one_hot,
-            goal_one_hot,
-        ],
-        dim=-1,
-    )  # [B, N, 7]
-
-    return node_features
-
-
 def policy_gnn(
     graph: TorchGraph,
     gnn: torch.nn.Module,
@@ -349,8 +318,7 @@ def policy_gnn(
     mask = preprocess_mask(tree_path, current_graph_node, goal_graph_node)
     node_features = preprocess_features(graph, current_graph_node, goal_graph_node)
     Q = gnn(node_features, graph.edge_matrix, mask)
-    noise = torch.rand_like(Q)
-    return noise
+    return Q
 
 
 def add_node(

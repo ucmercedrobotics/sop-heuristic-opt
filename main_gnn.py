@@ -28,7 +28,7 @@ def main():
         current_graph_node,
         cost=torch.zeros(batch_size, device=device),
     )
-    dense_gat = DenseGAT(in_channels=7, hidden_channels=128, out_channels=128, heads=2)
+    dense_gat = DenseGAT(in_channels=4, hidden_channels=128, out_channels=128, heads=2)
 
     mask = preprocess_mask(tree_path, current_graph_node, current_graph_node)
     node_features = preprocess_features(graphs, current_graph_node, current_graph_node)
