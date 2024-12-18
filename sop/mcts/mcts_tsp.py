@@ -7,7 +7,41 @@ from tqdm import tqdm
 
 from sop.utils.graph_torch import TorchGraph
 from sop.utils.path2 import Path
-from sop.gnn.gat import preprocess_features
+from sop.gnn.gat import preprocess_features, mask_adj, preprocess_edges
+
+
+def run_greedy_gnn_solver(
+    graph: TorchGraph,
+    gnn: torch.nn.Module,
+    start_graph_node: torch.Tensor,
+    device: str = "cpu",
+):
+    batch_size, num_nodes = graph.size()
+
+    current_graph_node = start_graph_node.clone()
+    indices = torch.arange(batch_size)
+
+    # Create path buffer
+    path = Path.empty(batch_size, num_nodes, device)
+    path.append(
+        indices,
+        current_graph_node,
+        cost=torch.zeros_like(current_graph_node, dtype=torch.float32),
+    )
+
+    for step in tqdm(range(num_nodes)):
+        if step < num_nodes - 1:
+            Q = policy_gnn(graph, gnn, path, current_graph_node, start_graph_node)
+            Q = torch.masked_fill(Q, path.mask, torch.inf)
+            next_graph_node = torch.argmin(Q, axis=-1)
+        else:
+            next_graph_node = start_graph_node
+
+        cost = graph.edges["distance"][indices, current_graph_node, next_graph_node]
+        path.append(indices, next_graph_node, cost)
+        current_graph_node = next_graph_node
+
+    return path
 
 
 def run_tsp_solver(
@@ -38,7 +72,7 @@ def run_tsp_solver(
 
     for step in tqdm(range(num_nodes)):
         if step < num_nodes - 1:
-            next_graph_node = MCTS_TSP2(
+            next_graph_node = MCTS_TSP(
                 tree,
                 graph,
                 gnn,
@@ -50,7 +84,7 @@ def run_tsp_solver(
         else:
             next_graph_node = start_graph_node
 
-        cost = graph.edge_matrix[indices, current_graph_node, next_graph_node]
+        cost = graph.edges["distance"][indices, current_graph_node, next_graph_node]
         path.append(indices, next_graph_node, cost)
         current_graph_node = next_graph_node
 
@@ -58,35 +92,6 @@ def run_tsp_solver(
 
 
 def MCTS_TSP(
-    graph: TorchGraph,
-    current_path: Path,
-    current_graph_node: torch.Tensor,
-    goal_graph_node: torch.Tensor,
-    num_simulations: int,
-    z: float = 0.1,
-):
-    tree = Tree.instantiate_from_root(current_graph_node, graph, num_simulations)
-
-    for k in range(num_simulations):
-        # start = time.time()
-        parent_tree_node, parent_graph_node, tree_path, is_expanded, depth = select_gnn(
-            tree, graph, current_path, z=z
-        )
-        # print(f"Select: {time.time() - start}")
-        # start = time.time()
-        Q = policy_gnn(graph, tree_path, parent_graph_node, goal_graph_node)
-        # print(f"Policy: {time.time() - start}")
-        # start = time.time()
-        expand_gnn(tree, tree_path, parent_tree_node, Q, is_expanded, depth)
-        # print(f"Expand: {time.time() - start}")
-        # start = time.time()
-        backup_gnn(tree, tree_path, graph, parent_tree_node)
-        # print(f"Backup: {time.time() - start}")
-
-    return select_action(tree, current_path)
-
-
-def MCTS_TSP2(
     tree,
     graph: TorchGraph,
     gnn: torch.nn.Module,
@@ -94,7 +99,7 @@ def MCTS_TSP2(
     current_graph_node: torch.Tensor,
     goal_graph_node: torch.Tensor,
     num_simulations: int,
-    z: float = 0.1,
+    z: float = 0.05,
 ):
     # TODO: Fix bug with reset
     # tree.reset(current_graph_node)
@@ -117,8 +122,7 @@ def MCTS_TSP2(
         backup_gnn(tree, tree_path, graph, parent_tree_node)
         # print(f"{k} - Backup: {time.time() - start}")
 
-    action = select_action(tree, current_path)
-    return action
+    return select_action(tree, current_path)
 
 
 # TODO: Figure out how to add this to tree class
@@ -187,13 +191,6 @@ class Tree:
 
         return tree
 
-    def reset(self, root_graph_node: torch.Tensor):
-        self.node_mapping[:, ROOT_INDEX] = root_graph_node
-        self.children_index[:, ROOT_INDEX] = torch.full_like(
-            self.children_index[:, ROOT_INDEX], fill_value=UNVISITED
-        )
-        self.num_nodes = torch.ones_like(self.num_nodes)
-
     def size(self):
         # [batch_size, num_tree_nodes, num_graph_nodes]
         return self.children_index.shape
@@ -229,7 +226,7 @@ def compute_uct(
     return Q - z * torch.sqrt(torch.log(t + 1e-5).unsqueeze(-1) / N)
 
 
-def select_gnn(tree: Tree, graph: TorchGraph, current_path: Path, z: float = 0.1):
+def select_gnn(tree: Tree, graph: TorchGraph, current_path: Path, z: float = 0.05):
     """Select function using tree policy to pick best node to expand.
 
     In regular MCTS select, you choose one leaf node to expand,
@@ -284,7 +281,7 @@ def select_gnn(tree: Tree, graph: TorchGraph, current_path: Path, z: float = 0.1
 
             # Add to path
             current_graph_node = parent_graph_node[indices]
-            cost = graph.edge_matrix[indices, current_graph_node, next_graph_node]
+            cost = graph.edges["distance"][indices, current_graph_node, next_graph_node]
             tree_path.append(indices, next_graph_node, cost)
 
             # Update Loop State
@@ -316,8 +313,13 @@ def policy_gnn(
     goal_graph_node: torch.Tensor,
 ):
     mask = preprocess_mask(tree_path, current_graph_node, goal_graph_node)
-    node_features = preprocess_features(graph, current_graph_node, goal_graph_node)
-    Q = gnn(node_features, graph.edge_matrix, mask)
+
+    node_features = preprocess_features(
+        graph, current_graph_node, goal_graph_node, mask
+    )
+    adj = mask_adj(mask)
+    edge_attr = preprocess_edges(graph, current_graph_node, goal_graph_node)
+    Q = gnn(node_features, adj, edge_attr, mask)
     return Q
 
 
@@ -518,7 +520,7 @@ def backup_gnn(
     # -- Backpropogate lowest value
     while indices.numel() > 0:
         # Calculate new estimate
-        distance = graph.edge_matrix[indices, parent_graph_node, child_graph_node]
+        distance = graph.edges["distance"][indices, parent_graph_node, child_graph_node]
         new_estimate = child_Q + distance
 
         # If the predicted is a better value

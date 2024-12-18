@@ -36,6 +36,8 @@ def add_to_buffer(buffer: ReplayBuffer, graph: TorchGraph, path: Path):
         current_node = path.nodes[indices, i - 1]
         action = path.nodes[indices, i]
         value = torch.sum(path.costs[indices, i + 1 :], axis=-1)
+        print(path.costs)
+        print(value)
         gnn_mask[indices, action] = True
         gnn_mask[indices, current_node] = True
 

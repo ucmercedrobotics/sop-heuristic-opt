@@ -5,11 +5,11 @@ from tensordict import tensorclass, TensorDict
 @tensorclass
 class TorchGraph:
     nodes: TensorDict
-    edge_matrix: torch.Tensor
+    edges: TensorDict
 
-    def size(self):
+    def size(self, key="adj"):
         "Returns size of graph as (batch_size, num_nodes)"
-        return self.edge_matrix.size(0), self.edge_matrix.size(-1)
+        return self.edges[key].size(0), self.edges[key].size(-1)
 
 
 def generate_random_graph_batch(
@@ -30,11 +30,18 @@ def generate_random_graph_batch(
 
     # Create edges
     # p=2 is L2 norm, or euclidean distance
-    edge_matrices = torch.cdist(positions, positions, p=2)
+    adj = complete_adjacency_matrix(batch_size, num_nodes)
+    edge_distances = compute_distances(positions, p=2)
+
+    edges = TensorDict(
+        {"adj": adj, "distance": edge_distances},
+        batch_size=[batch_size],
+        device=device,
+    )
 
     return TorchGraph(
         nodes=nodes,
-        edge_matrix=edge_matrices,
+        edges=edges,
         batch_size=[batch_size],
         device=device,
     )
@@ -54,13 +61,27 @@ def generate_uniform_reward(size: tuple, device: str = "cpu") -> torch.Tensor:
     return torch.rand(size, device=device)
 
 
+# -- Edges
+def compute_distances(x: torch.Tensor, p: int = 2):
+    return torch.cdist(x, x, p=p)
+
+
+def complete_adjacency_matrix(batch_size: int, num_nodes: int):
+    adj = torch.ones((num_nodes, num_nodes))
+    adj.fill_diagonal_(0)
+    adj = adj.unsqueeze(0).expand((batch_size, num_nodes, num_nodes))
+    return adj
+
+
 if __name__ == "__main__":
     import time
 
-    N = 100  # num_nodes
+    N = 20  # num_nodes
     B = 256  # batch_size
 
     start = time.time()
     G = generate_random_graph_batch(B, N)
     batch_time = time.time() - start
     print(f"Time elapsed batched2: {batch_time}")
+
+    print(G.edges["adj"])
