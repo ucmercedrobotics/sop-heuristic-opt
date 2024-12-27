@@ -1,65 +1,74 @@
 import matplotlib.pyplot as plt
+import graphviz
 import torch
 
 from sop.utils.graph_torch import TorchGraph
-from sop.utils.path2 import Path
+from sop.mcts.core import Tree
 
 
 # -- Visualization
-def plot_solution(graph: TorchGraph, path: torch.Tensor):
-    fig, ax = plt.subplots()
 
-    starting_node = path[0]
-    pos = graph.nodes["position"]
 
-    # -- Draw nodes
-    colors = ["b"] * pos.shape[0]
-    colors[starting_node] = "r"
+def plot_solutions(
+    graph: TorchGraph,
+    paths: list[torch.Tensor],
+    titles: list[str],
+    rows: int = 1,
+    cols: int = 2,
+):
+    assert len(paths) == len(titles)
 
-    ax.scatter(x=pos[:, 0], y=pos[:, 1], c=colors, alpha=0.5)
+    fig, axes = plt.subplots(rows, cols, figsize=(12, 8))
+    axes = axes.flatten()
 
-    # -- Draw edges
-    points = pos[path]
-    for i in range(points.shape[0] - 1):
-        ax.plot(
-            points[i : i + 2, 0],
-            points[i : i + 2, 1],
-            linewidth="1",
-            linestyle="solid",
-        )
+    for i, (path, title) in enumerate(zip(paths, titles)):
+        ax = axes[i]
+        starting_node = path[0]
+        pos = graph.nodes["position"]
 
-    ax.grid(True)
-    fig.tight_layout()
+        # -- Draw nodes
+        colors = ["b"] * pos.shape[0]
+        colors[starting_node] = "r"
+
+        ax.scatter(x=pos[:, 0], y=pos[:, 1], c=colors, alpha=0.5)
+
+        # -- Draw edges
+        points = pos[path]
+        for i in range(points.shape[0] - 1):
+            ax.annotate(
+                "", xy=points[i + 1], xytext=points[i], arrowprops=dict(arrowstyle="->")
+            )
+
+        ax.set_title(title)
+        ax.grid(True)
+
+    # Hide unused subplots
+    for i in range(len(paths), len(axes)):
+        fig.delaxes(axes[i])  # Removes empty subplot spaces
+
+    plt.tight_layout()
     plt.show()
 
 
-if __name__ == "__main__":
-    import matplotlib.pyplot as plt
-    import numpy as np
+def plot_tree(tree: Tree):
+    dot = graphviz.Digraph("Tree", comment="MCTS Tree")
 
-    import matplotlib.cbook as cbook
+    def add_node(dot: graphviz.Digraph, tree: Tree, node: int):
+        node_mapping = tree.node_mapping[node]
+        visit_count = tree.visit_count[node]
+        V = tree.node_value[node]
+        s = f"{node_mapping}\nv: {visit_count}\nV: {V:.4f}"
+        dot.node(f"{node}", s)
 
-    # Load a numpy record array from yahoo csv data with fields date, open, high,
-    # low, close, volume, adj_close from the mpl-data/sample_data directory. The
-    # record array stores the date as an np.datetime64 with a day unit ('D') in
-    # the date column.
-    price_data = cbook.get_sample_data("goog.npz")["price_data"]
-    price_data = price_data[-250:]  # get the most recent 250 trading days
+        children = tree.children_index[node]
+        for child in children:
+            if child == -1:
+                continue
+            add_node(dot, tree, child)
+            child_mapping = tree.node_mapping[child]
+            Q = tree.children_Q_values[node, child_mapping]
+            dot.edge(f"{node}", f"{child}", label=f"{Q:.4f}")
 
-    delta1 = np.diff(price_data["adj_close"]) / price_data["adj_close"][:-1]
+    add_node(dot, tree, 0)
 
-    # Marker size in units of points^2
-    volume = (15 * price_data["volume"][:-2] / price_data["volume"][0]) ** 2
-    close = 0.003 * price_data["close"][:-2] / 0.003 * price_data["open"][:-2]
-
-    fig, ax = plt.subplots()
-    ax.scatter(delta1[:-1], delta1[1:], c=close, s=volume, alpha=0.5)
-
-    ax.set_xlabel(r"$\Delta_i$", fontsize=15)
-    ax.set_ylabel(r"$\Delta_{i+1}$", fontsize=15)
-    ax.set_title("Volume and percent change")
-
-    ax.grid(True)
-    fig.tight_layout()
-
-    plt.show()
+    return dot

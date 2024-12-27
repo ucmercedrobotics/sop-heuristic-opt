@@ -166,3 +166,6 @@ outputs/
 
 # Tensorboard
 runs/
+
+# Model Checkpoints
+checkpoints/

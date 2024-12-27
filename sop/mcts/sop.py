@@ -1,16 +1,59 @@
+from dataclasses import dataclass
+from typing import ClassVar
 import torch
 from torch_geometric.data import Data, Batch
 import time
 
 import sop.utils.graph_torch as graph_lib
 import sop.utils.path as path_lib
-import sop.mcts.tree as tree_lib
 import sop.utils.heuristic as heuristic_lib
 
 Graph = graph_lib.Graph
 Path = path_lib.Path
-Tree = tree_lib.Tree
 Heuristic = heuristic_lib.SAAHeuristic
+
+Array = torch.Tensor
+
+# WARNING: This file is out of date, only for reference
+# TODO: Implement this file properly.
+
+
+@dataclass
+class Tree:
+    """State of the search tree."""
+
+    node_mapping: Array  # [B, N], index of node in original graph
+    raw_values: Array  # [B, N], raw computed value for each node
+    node_values: Array  # [B, N], cumulative search value for each node
+    raw_failure_probs: Array  # [B, N], raw failure probability for each node
+    failure_probs: Array  # [B, N], raw failure probability for each node
+    node_visits: Array  # [B, N], visit counts for each node
+    parents: Array  # [B, N], node index for the parents of each node
+    neighbor_from_parent: (
+        Array  # [B, N], the neighbor index to take from the parent to each node
+    )
+    children_index: (
+        Array  # [B, N, num_neighbors], the node index of the neighbor if visited
+    )
+    children_values: (
+        Array  # [B, N, num_neighbors], the value of traveling to neighbor from node
+    )
+    children_failure_probs: (
+        Array  # [B, N, num_nodes], the failure prob of traveling to neighbor from node
+    )
+    children_visits: Array  # [B, N, num_nodes], the visit counts for each neighbor
+
+    num_nodes: Array  # [B,], amount of visited nodes in the tree
+
+    # Static class variables
+    ROOT_INDEX: ClassVar[int] = 0
+    NO_PARENT: ClassVar[int] = -1
+    UNVISITED: ClassVar[int] = -1
+
+
+def infer_tree_shape(tree: Tree):
+    batch_size, num_simulations = tree.node_mapping.shape
+    return batch_size, num_simulations
 
 
 def run(

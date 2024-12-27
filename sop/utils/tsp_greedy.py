@@ -2,7 +2,7 @@ import torch
 from tsp_solver.greedy import solve_tsp
 
 from sop.utils.graph_torch import TorchGraph
-from sop.utils.path2 import Path
+from sop.utils.path import Path
 
 
 def run_greedy_tsp_solver(graphs: TorchGraph, start_nodes: torch.Tensor):
@@ -24,7 +24,7 @@ def run_greedy_tsp_solver(graphs: TorchGraph, start_nodes: torch.Tensor):
     path_buffer.append(
         indices,
         start_nodes,
-        cost=torch.zeros_like(start_nodes, dtype=torch.float32),
+        reward=torch.zeros_like(start_nodes, dtype=torch.float32),
     )
     for i in range(1, greedy_paths.shape[-1]):
         prev_node = greedy_paths[indices, i - 1]

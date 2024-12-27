@@ -5,7 +5,7 @@ import torch
 
 from sop.utils.graph_torch import generate_random_graph_batch, get_bytes
 from sop.utils.perf import profile
-from sop.mcts.mcts_sop import run
+from sop.mcts.sop import run
 
 # TODO: Travelling salesman
 
