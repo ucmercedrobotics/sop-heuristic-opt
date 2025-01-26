@@ -12,6 +12,7 @@ root = rootutils.setup_root(__file__, indicator=".project-root", pythonpath=True
 from sop.utils.graph_torch import TorchGraph, generate_random_graph_batch
 from sop.utils.sample import sample_costs
 from sop.mcts.sop2 import sop_mcts_solver
+from sop.milp.pulp_milp_sop import sop_milp_solver
 
 
 # -- Config
@@ -114,6 +115,12 @@ def main(cfg: Config) -> None:
     print(torch.sum(is_success) / cfg.batch_size)
     print(torch.mean(paths.length.float()))
     print(paths.reward.sum(-1).mean())
+
+    # -- Test against MILP
+    # TODO: MILP is bugged.....
+    # graph = graphs[0].squeeze()
+    # edge_list = sop_milp_solver(graph, num_samples=cfg.num_samples)
+    # print(edge_list)
 
 
 if __name__ == "__main__":

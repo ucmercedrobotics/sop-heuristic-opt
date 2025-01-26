@@ -1,5 +1,10 @@
 import pulp
 import torch
+from torch import Tensor
+import re
+
+from sop.utils.graph_torch import TorchGraph
+from sop.utils.path import Path
 
 """
 The MILP formulation for SOP is taken from the following paper:
@@ -44,66 +49,20 @@ s.t.
 """
 
 
-# Utils
-def generate_uniform_reward(N: tuple, device: str = "cpu") -> torch.Tensor:
-    """Computes random reward for each node in the graph."""
-    return torch.rand((N), device=device)
-
-
-def generate_uniform_positions(N: int, device: str = "cpu") -> torch.Tensor:
-    """Creates 2D positions for each node in the graph."""
-    xs = torch.rand((N), device=device)  # (...size,)
-    ys = torch.rand((N), device=device)  # (...size,)
-    return torch.stack([xs, ys], dim=-2)  # (2, size...)
-
-
-def compute_distances(x: torch.Tensor, p: int = 2):
-    return torch.cdist(x, x, p=p)
-
-
-def generate_example_graph(N: int, device: str = "cpu") -> torch.Tensor:
-    positions = generate_uniform_positions(N, device)
-    rewards = generate_uniform_reward(N, device)
-    positions = positions.T
-    distances = compute_distances(positions, p=2)
-
-    return rewards, distances
-
-
-# -- Sample costs
-def sample_exponential_distribution(rate: torch.Tensor, num_samples: int):
-    """Faster Exponential distribution w/ https://en.wikipedia.org/wiki/Inverse_transform_sampling.
-    x = -(1/rate)*ln(y)
-    """
-    sample_shape = (*rate.shape, num_samples)
-    y = torch.rand(sample_shape)
-    samples = -(1 / rate).unsqueeze(-1) * torch.log(y)
-    return samples
-
-
-def sample_costs(weights: torch.Tensor, num_samples: int, kappa: float = 0.5):
-    rate = 1 / ((1 - kappa) * weights)
-    samples = sample_exponential_distribution(rate, num_samples)
-    sampled_costs = (kappa * weights).unsqueeze(-1) + samples
-    return sampled_costs
-
-
 def create_pulp_instance(
-    num_nodes: int,
-    budget: int,
+    rewards: Tensor,
+    costs: Tensor,
+    samples: Tensor,
+    budget: float,
+    start: int,
+    goal: int,
     num_samples: int,
-    rewards: torch.Tensor,
-    costs: torch.Tensor,
     M: int = 1000,
-    kappa: float = 0.5,
     alpha_prime: float = 0.1,
 ) -> pulp.LpProblem:
-    # Assume start node is 0 and end node is N - 1
-    start = 0
-    end = num_nodes - 1
-
-    # Generate samples
-    sampled_costs = sample_costs(costs, num_samples, kappa)  # Samples
+    # Make sure graph is not batched
+    assert rewards.ndim == 1 and costs.ndim == 2, "Graph is not in corrrect format."
+    num_nodes = int(rewards.shape[0])
 
     # Setup maximization problem
     prob = pulp.LpProblem("SOP", pulp.LpMaximize)
@@ -119,7 +78,9 @@ def create_pulp_instance(
 
     # 2. Ranking r_i (15)
     r_indices = [i for i in nodes]
-    r = pulp.LpVariable.dicts("r", r_indices, lowBound=0, upBound=N - 1, cat="Integer")
+    r = pulp.LpVariable.dicts(
+        "r", r_indices, lowBound=0, upBound=num_nodes - 1, cat="Integer"
+    )
 
     # Setup objective function (8)
     prob += pulp.lpSum(pi[i, j] * rewards[j] for (i, j) in edges)
@@ -134,7 +95,7 @@ def create_pulp_instance(
 
     # Add constraint (12)
     prob += pulp.lpSum(pi[start, j] for j in adj_list[start]) == 1
-    prob += pulp.lpSum(pi[j, end] for j in adj_list[end]) == 1
+    prob += pulp.lpSum(pi[j, goal] for j in adj_list[goal]) == 1
 
     # Add constraint (13)
     # Case 1: i = start
@@ -143,13 +104,13 @@ def create_pulp_instance(
     prob += outgoing - incoming == 1
 
     # Case 2: i = end
-    outgoing = pulp.lpSum(pi[end, j] for j in adj_list[end])
-    incoming = pulp.lpSum(pi[j, end] for j in adj_list[end])
+    outgoing = pulp.lpSum(pi[goal, j] for j in adj_list[goal])
+    incoming = pulp.lpSum(pi[j, goal] for j in adj_list[goal])
     prob += outgoing - incoming == -1
 
     # Case 3: i not start or end
     for i in range(num_nodes):
-        if i == start or i == end:
+        if i == start or i == goal:
             continue
         outgoing = pulp.lpSum(pi[i, j] for j in adj_list[i])
         incoming = pulp.lpSum(pi[j, i] for j in adj_list[i])
@@ -163,7 +124,7 @@ def create_pulp_instance(
 
     # Add constraint (15)
     prob += r[start] == 0
-    prob += r[end] == num_nodes - 1
+    prob += r[goal] == num_nodes - 1
 
     # SAA Constraints (17-19)
     # Define variables:
@@ -173,7 +134,7 @@ def create_pulp_instance(
     # Add constraint (17)
     for q in range(num_samples):
         prob += budget + budget * z[q] >= (
-            pulp.lpSum(pi[i, j] * sampled_costs[i, j, q] for (i, j) in edges)
+            pulp.lpSum(pi[i, j] * samples[i, j, q] for (i, j) in edges)
         )
 
     # Add constraint (19)
@@ -183,30 +144,63 @@ def create_pulp_instance(
 
 
 def extract_solution(prob):
-    edge_list = []
+    # Regex to extract the two edges
+    # Ex. 'pi_(10,_19)' -> 10, 19
+    pattern = r"pi_\((\d+),_(\d+)\)"
+
+    edge_dict = {}
     for v in prob.variables():
         if v.varValue > 0:
             if v.name.startswith("pi"):
-                edge_list.append(v.name)
-    return edge_list
+                a, b = [int(x) for x in re.search(pattern, v.name).groups()]
+                edge_dict[a] = b
+    return edge_dict
 
 
-if __name__ == "__main__":
-    # Input
-    N = 20  # Num nodes
-    Q = 100  # Num samples
-    alpha_prime = 0.1  # Chance constraint
-    H = 2  # Budget
-    M = 1000  # Constant to ensure ranking
-    kappa = 0.5
+def edge_list_to_path(
+    edge_dict: dict, start_node: int, goal_node: int, rewards: Tensor
+) -> Path:
+    num_nodes = int(rewards.shape[0])
+    indices = torch.arange(1)
 
-    R, T = generate_example_graph(N)  # Reward, Cost Matrix
-    prob = create_pulp_instance(N, H, Q, R, T, M, kappa, alpha_prime)
-    print("Created Problem")
+    # Initialize path
+    path = Path.empty(1, num_nodes)
+    path.append(indices, start_node)
+
+    # iterate edge_dict until goal node
+    current_node = start_node
+    while current_node != goal_node:
+        next_node = edge_dict[current_node]
+        reward = rewards[next_node]
+        path.append(indices, next_node, reward=reward)
+
+        current_node = next_node
+
+    return path
+
+
+def sop_milp_solver(
+    graph: TorchGraph,
+    time_limit: int = 180,
+    num_samples: int = 100,
+    M: int = 1000,
+    alpha_prime: float = 0.1,
+) -> Path:
+    R = graph.nodes["reward"]
+    C = graph.edges["distance"]
+    S = graph.edges["samples"]
+    b = float(graph.extra["budget"])
+    s = int(graph.extra["start_node"])
+    g = int(graph.extra["goal_node"])
+
+    print("Generating PuLP instance...")
+    prob = create_pulp_instance(R, C, S, b, s, g, num_samples, M, alpha_prime)
 
     solver = pulp.getSolver("HiGHS")
-    solver.timeLimit = 180
+    solver.timeLimit = time_limit
 
+    print("Solving instance...")
     result = prob.solve(solver)
     print(result)
-    extract_solution(prob)
+    edge_dict = extract_solution(prob)
+    return edge_list_to_path(edge_dict, s, g, R)
