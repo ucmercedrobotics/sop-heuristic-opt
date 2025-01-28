@@ -11,7 +11,6 @@ class Path:
     """Path for SOP."""
 
     nodes: Tensor  # [B, num_nodes + 1]
-    cost: Tensor  # [B, num_nodes + 1]
     reward: Tensor  # [B, num_nodes + 1]
     mask: Tensor  # [B, num_nodes]
     length: Tensor  # [B,]
@@ -22,7 +21,6 @@ class Path:
         mask_size = (batch_size, num_nodes)
         return cls(
             nodes=torch.full(max_size, UNVISITED, dtype=torch.long, device=device),
-            cost=torch.full(max_size, UNVISITED, dtype=torch.float32, device=device),
             reward=torch.zeros(max_size, dtype=torch.float32, device=device),
             mask=torch.zeros(mask_size, dtype=torch.bool, device=device),
             length=torch.zeros((batch_size,), dtype=torch.long, device=device),
@@ -37,15 +35,11 @@ class Path:
         self,
         indices: Tensor,
         node: Tensor,
-        cost: Optional[Tensor] = None,
         reward: Optional[Tensor] = None,
     ):
         index = self.length[indices]
 
         self.nodes[indices, index] = node
-
-        if cost is not None:
-            self.cost[indices, index] = cost
 
         if reward is not None:
             self.reward[indices, index] = reward

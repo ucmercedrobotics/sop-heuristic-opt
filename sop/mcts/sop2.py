@@ -21,16 +21,16 @@ def sop_mcts_solver(
     batch_size, num_nodes = graph.size()
 
     current_node = graph.extra["start_node"].clone()
-    current_budget = graph.extra["budget"].clone().float()
+    current_budget = graph.extra["budget"].clone()
     goal_node = graph.extra["goal_node"].clone()
 
     # Loop State
     indices = torch.arange(batch_size)
     path = Path.empty(batch_size, num_nodes, device)
-    path.append(indices, node=current_node)
+    path.append(indices, current_node)
 
     while indices.numel() > 0:
-        next_node = MCTS_SOPCC(
+        next_node, score = MCTS_SOPCC(
             graph[indices],
             heuristic[indices],
             current_node[indices],
@@ -41,6 +41,10 @@ def sop_mcts_solver(
             z,
             device,
         )
+        is_invalid = score == -torch.inf
+        invalid_i = indices[is_invalid]
+        if invalid_i.numel() > 0:
+            next_node[is_invalid] = goal_node[invalid_i]
 
         # Get values
         r = graph.nodes["reward"][indices, next_node]
@@ -51,7 +55,7 @@ def sop_mcts_solver(
         current_budget[indices] -= sampled_cost
 
         # Add to path
-        path.append(indices, next_node, cost=sampled_cost, reward=r)
+        path.append(indices, next_node, reward=r)
 
         # Update state
         is_not_goal = next_node != goal_node[indices]
@@ -75,7 +79,7 @@ def MCTS_SOPCC(
     num_rollouts: int,
     z: float,
     device: str = "cpu",
-):
+) -> Tuple[Tensor, Tensor]:
     tree = Tree.instantiate_from_root(current_node, graph, num_simulations, device)
     for k in range(num_simulations):
         # s = time.time()
@@ -100,7 +104,7 @@ def MCTS_SOPCC(
         backupN(tree, new_tree_node)
         # print(f"BackupN: {time.time() - s}")
 
-    return select_action(tree)
+    return select_action(tree, current_path)
 
 
 # -- CONSTANTS
@@ -219,9 +223,7 @@ def select(
         leaf_graph_node[indices] = next_graph_node
 
         # Add to tree path
-        current_graph_node = tree.node_mapping[indices, current_tree_node]
-        cost = graph.edges["distance"][indices, current_graph_node, next_graph_node]
-        tree_path.append(indices, next_graph_node, cost=cost)
+        tree_path.append(indices, next_graph_node)
 
         # 1. Check if node is leaf
         is_expanded[indices] = next_tree_node != UNVISITED
@@ -416,31 +418,47 @@ def backupN(tree: Tree, leaf_tree_node: Tensor):
 
 
 # -- Action Selection
-def select_action(tree: Tree):
-    batch_size, _, _ = tree.size()
-    scores = tree.children_Q_values[torch.arange(batch_size), ROOT_INDEX]
-    action = torch.argmax(scores, axis=-1)
-    return action
+def select_action(tree: Tree, path: Path, p_f: float = 0.1) -> Tuple[Tensor, Tensor]:
+    batch_size, _, num_nodes = tree.size()
+    indices = torch.arange(batch_size)
+
+    scores = tree.children_Q_values[indices, ROOT_INDEX]
+    failure_probs = tree.children_failure_probs[indices, ROOT_INDEX]
+
+    failure_mask = failure_probs > p_f
+    mask = torch.logical_or(path.mask, failure_mask)
+    masked_scores = torch.masked_fill(scores, mask, -torch.inf)
+
+    action = torch.argmax(masked_scores, axis=-1)
+    score = masked_scores[indices, action]
+
+    return action, score
 
 
 # -- ROLLOUT
-def sample_traverse_cost(path: Path, num_samples: int, kappa: float = 0.5):
+def sample_traverse_cost(
+    path: Path, graph: TorchGraph, num_samples: int, kappa: float = 0.5
+):
     batch_size, max_length = path.size()
     indices = torch.arange(batch_size)
 
     total_sampled_cost = torch.zeros((batch_size, num_samples))
+
     path_index = 1
-
     while path_index < max_length:
-        weight = path.cost[indices, path_index]
+        prev_node = path.nodes[indices, path_index - 1]
+        current_node = path.nodes[indices, path_index]
+        weight = graph.edges["distance"][indices, prev_node, current_node]
+        # samples = graph.edges["samples"][indices, prev_node, current_node]
 
-        is_continuing = weight != -1
+        is_continuing = current_node != -1
         indices = indices[is_continuing]
         if indices.numel() == 0:
             break
 
         sampled_cost = sample_costs(weight[is_continuing], num_samples, kappa)
         total_sampled_cost[indices] += sampled_cost
+        # total_sampled_cost[indices] += samples[is_continuing]
 
         path_index += 1
 
@@ -507,7 +525,7 @@ def e_greedy_rollout(
     )  # [B*S]
 
     # Sample traverse cost
-    ts = sample_traverse_cost(tree_path, num_rollouts, kappa)
+    ts = sample_traverse_cost(tree_path, graph, num_rollouts, kappa)
     sampled_budgets = budget.unsqueeze(-1) - ts  # [B, S]
     simulated_budgets = sampled_budgets.flatten()
 

@@ -2,7 +2,6 @@ from dataclasses import dataclass
 import hydra
 from hydra.core.config_store import ConfigStore
 
-import time
 import torch
 
 import rootutils
@@ -13,6 +12,8 @@ from sop.utils.graph_torch import TorchGraph, generate_random_graph_batch
 from sop.utils.sample import sample_costs
 from sop.mcts.sop2 import sop_mcts_solver
 from sop.milp.pulp_milp_sop import sop_milp_solver
+from sop.utils.visualization import plot_solutions
+from sop.utils.path import Path
 
 
 # -- Config
@@ -31,7 +32,7 @@ class Config:
     kappa: float = 0.5
     # MCTS
     num_simulations: int = 100
-    z: float = 100
+    z: float = 0.1
 
 
 cs = ConfigStore.instance()
@@ -48,7 +49,7 @@ def generate_sop_graphs(cfg: Config) -> TorchGraph:
         (cfg.batch_size,), cfg.goal_node, device=cfg.device
     )
     graphs.extra["budget"] = torch.full(
-        (cfg.batch_size,), cfg.budget, device=cfg.device
+        (cfg.batch_size,), cfg.budget, dtype=torch.float32, device=cfg.device
     )
     graphs.edges["samples"] = sample_costs(
         graphs.edges["distance"], cfg.num_samples, cfg.kappa, cfg.device
@@ -66,6 +67,36 @@ def mcts_sopcc_heuristic(
 ):
     average_cost = sampled_costs.mean(dim=-1)
     return rewards.unsqueeze(-1) / average_cost
+
+
+# -- Evaluate Path
+def evaluate_path(
+    path: Path, graph: TorchGraph, num_samples: int, kappa: float
+) -> torch.Tensor:
+    batch_size, max_length = path.size()
+    indices = torch.arange(batch_size)
+
+    budget = graph.extra["budget"].clone()
+    current_budget = budget.unsqueeze(-1).expand((-1, num_samples))
+
+    path_index = 1
+    while path_index < max_length:
+        prev_node = path.nodes[indices, path_index - 1]
+        current_node = path.nodes[indices, path_index]
+        weight = graph.edges["distance"][indices, prev_node, current_node]
+        # samples = graph.edges["samples"][indices, prev_node, current_node]
+
+        is_continuing = current_node != -1
+        indices = indices[is_continuing]
+        if indices.numel() == 0:
+            break
+
+        sampled_cost = sample_costs(weight[is_continuing], num_samples, kappa)
+        current_budget[indices] -= sampled_cost
+        # current_budget[indices] -= samples[is_continuing]
+        path_index += 1
+
+    return (current_budget < 0).sum(-1) / num_samples, current_budget.mean(-1)
 
 
 # -- Main Script
@@ -90,7 +121,7 @@ def main(cfg: Config) -> None:
     # -- TODO: Gumbel Muzero
     # -- TODO: Thompson Sampling
     print("Generating Random Paths...")
-    paths, is_success = sop_mcts_solver(
+    random_paths, is_success = sop_mcts_solver(
         graph=graphs,
         heuristic=random_H,
         num_simulations=cfg.num_simulations,
@@ -98,12 +129,9 @@ def main(cfg: Config) -> None:
         z=cfg.z,
         device=cfg.device,
     )
-    print(torch.sum(is_success) / cfg.batch_size)
-    print(torch.mean(paths.length.float()))
-    print(paths.reward.sum(-1).mean())
 
     print("Generating Hardcoded Paths...")
-    paths, is_success = sop_mcts_solver(
+    hardcoded_paths, is_success = sop_mcts_solver(
         graph=graphs,
         heuristic=computed_H,
         num_simulations=cfg.num_simulations,
@@ -112,15 +140,48 @@ def main(cfg: Config) -> None:
         device=cfg.device,
     )
 
-    print(torch.sum(is_success) / cfg.batch_size)
-    print(torch.mean(paths.length.float()))
-    print(paths.reward.sum(-1).mean())
-
     # -- Test against MILP
-    # TODO: MILP is bugged.....
-    # graph = graphs[0].squeeze()
-    # edge_list = sop_milp_solver(graph, num_samples=cfg.num_samples)
-    # print(edge_list)
+    graph = graphs[0].squeeze()
+    milp_path = sop_milp_solver(graph, time_limit=180, num_samples=cfg.num_samples)
+
+    # print(
+    #     "hardcoded failure_prob",
+    #     evaluate_path(
+    #         hardcoded_paths[0].unsqueeze(0),
+    #         graphs[0].unsqueeze(0),
+    #         cfg.num_samples,
+    #         cfg.kappa,
+    #     ),
+    # )
+    # print(
+    #     "random failure_prob",
+    #     evaluate_path(
+    #         random_paths[0].unsqueeze(0),
+    #         graphs[0].unsqueeze(0),
+    #         cfg.num_samples,
+    #         cfg.kappa,
+    #     ),
+    # )
+    # print(
+    #     "milp failure_prob",
+    #     evaluate_path(milp_path, graph.unsqueeze(0), cfg.num_samples, cfg.kappa),
+    # )
+
+    plot_solutions(
+        graphs[0],
+        paths=[
+            random_paths[0],
+            hardcoded_paths[0],
+            milp_path[0],
+        ],
+        titles=[
+            f"Random Reward: {random_paths.reward.sum(-1)[0]:.5f}",
+            f"Hardcoded Reward: {hardcoded_paths.reward.sum(-1)[0]:.5f}",
+            f"Milp Reward: {milp_path.reward.sum(-1)[0]:.5f}",
+        ],
+        rows=1,
+        cols=3,
+    )
 
 
 if __name__ == "__main__":
