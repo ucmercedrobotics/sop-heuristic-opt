@@ -3,6 +3,7 @@ import graphviz
 import torch
 
 from sop.utils.graph_torch import TorchGraph
+from sop.utils.path import Path
 from sop.mcts.core import Tree
 
 
@@ -11,7 +12,7 @@ from sop.mcts.core import Tree
 
 def plot_solutions(
     graph: TorchGraph,
-    paths: list[torch.Tensor],
+    paths: list[Path],
     titles: list[str],
     rows: int = 1,
     cols: int = 2,
@@ -23,21 +24,33 @@ def plot_solutions(
 
     for i, (path, title) in enumerate(zip(paths, titles)):
         ax = axes[i]
-        starting_node = path[0]
+        starting_node = path.nodes[0]
+        goal_node = path.nodes[path.length - 1]
         pos = graph.nodes["position"]
 
         # -- Draw nodes
         colors = ["b"] * pos.shape[0]
         colors[starting_node] = "r"
+        colors[goal_node] = "g"
 
-        ax.scatter(x=pos[:, 0], y=pos[:, 1], c=colors, alpha=0.5)
+        alpha = (1.0 * graph.nodes["reward"]).tolist()
+        alpha[starting_node] = 0.5
+        alpha[goal_node] = 0.5
+
+        ax.scatter(x=pos[:, 0], y=pos[:, 1], c=colors, alpha=alpha)
 
         # -- Draw edges
-        points = pos[path]
-        for i in range(points.shape[0] - 1):
+        path_index = 1
+        while path_index < path.length:
+            prev_node = path.nodes[path_index - 1]
+            current_node = path.nodes[path_index]
             ax.annotate(
-                "", xy=points[i + 1], xytext=points[i], arrowprops=dict(arrowstyle="->")
+                "",
+                xy=pos[current_node],
+                xytext=pos[prev_node],
+                arrowprops=dict(arrowstyle="->"),
             )
+            path_index += 1
 
         ax.set_title(title)
         ax.grid(True)

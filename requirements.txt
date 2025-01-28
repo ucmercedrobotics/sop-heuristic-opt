@@ -2,6 +2,10 @@ hydra-core
 networkx
 numpy
 matplotlib
+rootutils
 # torch packages
 torch 
 torchvision
+# highs MILP solver
+highspy
+pulp

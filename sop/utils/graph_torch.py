@@ -6,6 +6,7 @@ from tensordict import tensorclass, TensorDict
 class TorchGraph:
     nodes: TensorDict
     edges: TensorDict
+    extra: TensorDict
 
     def size(self, key="adj"):
         "Returns size of graph as (batch_size, num_nodes)"
@@ -22,16 +23,16 @@ def generate_random_graph_batch(
     # Convert from (B, 2, N) -> (B, N, 2)
     positions = positions.permute(0, 2, 1)
 
+    # Create edges
+    # p=2 is L2 norm, or euclidean distance
+    adj = complete_adjacency_matrix(batch_size, num_nodes)
+    edge_distances = compute_distances(positions, p=2)
+
     nodes = TensorDict(
         {"position": positions, "reward": rewards},
         batch_size=[batch_size],
         device=device,
     )
-
-    # Create edges
-    # p=2 is L2 norm, or euclidean distance
-    adj = complete_adjacency_matrix(batch_size, num_nodes)
-    edge_distances = compute_distances(positions, p=2)
 
     edges = TensorDict(
         {"adj": adj, "distance": edge_distances},
@@ -39,9 +40,13 @@ def generate_random_graph_batch(
         device=device,
     )
 
+    # Extra dict for information like start_node and budget
+    extra = TensorDict({}, batch_size=[batch_size], device=device)
+
     return TorchGraph(
         nodes=nodes,
         edges=edges,
+        extra=extra,
         batch_size=[batch_size],
         device=device,
     )
@@ -76,12 +81,14 @@ def complete_adjacency_matrix(batch_size: int, num_nodes: int):
 if __name__ == "__main__":
     import time
 
-    N = 20  # num_nodes
-    B = 256  # batch_size
+    N = 100  # num_nodes
+    B = 1024  # batch_size
+
+    _ = generate_random_graph_batch(B, N)
 
     start = time.time()
     G = generate_random_graph_batch(B, N)
     batch_time = time.time() - start
     print(f"Time elapsed batched2: {batch_time}")
 
-    print(G.edges["adj"])
+    print(G.edges["adj"].shape)
