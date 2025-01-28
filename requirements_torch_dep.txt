@@ -1,0 +1,7 @@
+torch_geometric
+torch-scatter
+torch-sparse
+tensorboard
+tensordict
+graphviz
+torchrl
