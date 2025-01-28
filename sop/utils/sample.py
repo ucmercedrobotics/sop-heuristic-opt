@@ -10,7 +10,7 @@ def sample_exponential_distribution(
     x = -(1/rate)*ln(y)
     """
     sample_shape = (*rate.shape, num_samples)
-    y = torch.rand(sample_shape, device=device)
+    y = torch.rand(sample_shape)
     samples = -(1 / rate).unsqueeze(-1) * torch.log(y)
     return samples
 

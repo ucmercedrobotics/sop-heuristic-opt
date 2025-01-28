@@ -20,11 +20,11 @@ from sop.utils.path import Path
 @dataclass
 class Config:
     # Batch
-    batch_size: int = 1024
+    batch_size: int = 64
     device: str = "cpu"
     # Graph
-    num_nodes: int = 100
-    budget: int = 4
+    num_nodes: int = 20
+    budget: int = 2
     start_node: int = 1
     goal_node: int = 2
     # Sampling
@@ -102,6 +102,8 @@ def evaluate_path(
 # -- Main Script
 @hydra.main(version_base=None, config_name="improve_heuristic")
 def main(cfg: Config) -> None:
+    torch.set_default_device(cfg.device)
+
     # -- Generate Data
     print("Generating graphs...")
     graphs = generate_sop_graphs(cfg)
@@ -141,7 +143,7 @@ def main(cfg: Config) -> None:
     )
 
     # -- Test against MILP
-    graph = graphs[0].squeeze()
+    graph = graphs[0].squeeze().cpu()
     milp_path = sop_milp_solver(graph, time_limit=180, num_samples=cfg.num_samples)
 
     # print(
