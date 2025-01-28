@@ -2,3 +2,6 @@ hydra-core
 networkx
 numpy
 matplotlib
+# torch packages
+torch 
+torchvision
