@@ -1,6 +1,7 @@
-torch_geometric
-torch-scatter
-torch-sparse
+# TODO: add back for GNN support
+# torch_geometric
+# torch-scatter
+# torch-sparse
 tensorboard
 tensordict
 graphviz

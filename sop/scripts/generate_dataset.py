@@ -1,9 +1,9 @@
 from dataclasses import dataclass
+from datetime import datetime
+
 import hydra
 from hydra.core.config_store import ConfigStore
-
 import torch
-
 import rootutils
 
 root = rootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
@@ -21,6 +21,8 @@ DEVICE: str = "cuda" if torch.cuda.is_available() else "cpu"
 # -- Config
 @dataclass
 class Config:
+    # Dataset
+    dataset_path: str = "dataset"
     # Batch
     batch_size: int = 64
     device: str = DEVICE
@@ -38,7 +40,7 @@ class Config:
 
 
 cs = ConfigStore.instance()
-cs.store(name="improve_heuristic", node=Config)
+cs.store(name="generate_dataset", node=Config)
 
 
 # -- Graph Generation
@@ -102,51 +104,62 @@ def evaluate_path(
 
 
 # -- Main Script
-@hydra.main(version_base=None, config_name="improve_heuristic")
+@hydra.main(version_base=None, config_name="generate_dataset")
 def main(cfg: Config) -> None:
     torch.set_default_device(cfg.device)
+    current_datetime = datetime.now().strftime("%Y-%m-%d %H-%M-%S")
 
     # -- Generate Data
     print("Generating graphs...")
     graphs = generate_sop_graphs(cfg)
+    # NOTE: current format of path is <time>_dataset_<batch_size>_<graph_size>
+    graphs.export(
+        current_datetime
+        + "_"
+        + cfg.dataset_path
+        + "_"
+        + str(cfg.batch_size)
+        + "_"
+        + str(cfg.num_nodes)
+    )
 
     # -- Heuristic Creation
     # -- TODO: GNN heuristic
     # -- TODO: Gflownet heuristic
     # -- TODO: bayesian heuristic
-    print("Computing Heuristics...")
-    random_H = random_heuristic(cfg.batch_size, cfg.num_nodes, cfg.device)
-    computed_H = mcts_sopcc_heuristic(
-        graphs.nodes["reward"], graphs.edges["samples"], cfg.device
-    )
+    # print("Computing Heuristics...")
+    # random_H = random_heuristic(cfg.batch_size, cfg.num_nodes, cfg.device)
+    # computed_H = mcts_sopcc_heuristic(
+    #     graphs.nodes["reward"], graphs.edges["samples"], cfg.device
+    # )
 
-    # -- MCTS Improvement
-    # -- TODO: pUCT
-    # -- TODO: Gumbel Muzero
-    # -- TODO: Thompson Sampling
-    print("Generating Random Paths...")
-    random_paths, is_success = sop_mcts_solver(
-        graph=graphs,
-        heuristic=random_H,
-        num_simulations=cfg.num_simulations,
-        num_rollouts=cfg.num_samples,
-        z=cfg.z,
-        device=cfg.device,
-    )
+    # # -- MCTS Improvement
+    # # -- TODO: pUCT
+    # # -- TODO: Gumbel Muzero
+    # # -- TODO: Thompson Sampling
+    # print("Generating Random Paths...")
+    # random_paths, is_success = sop_mcts_solver(
+    #     graph=graphs,
+    #     heuristic=random_H,
+    #     num_simulations=cfg.num_simulations,
+    #     num_rollouts=cfg.num_samples,
+    #     z=cfg.z,
+    #     device=cfg.device,
+    # )
 
-    print("Generating Hardcoded Paths...")
-    hardcoded_paths, is_success = sop_mcts_solver(
-        graph=graphs,
-        heuristic=computed_H,
-        num_simulations=cfg.num_simulations,
-        num_rollouts=cfg.num_samples,
-        z=cfg.z,
-        device=cfg.device,
-    )
+    # print("Generating Hardcoded Paths...")
+    # hardcoded_paths, is_success = sop_mcts_solver(
+    #     graph=graphs,
+    #     heuristic=computed_H,
+    #     num_simulations=cfg.num_simulations,
+    #     num_rollouts=cfg.num_samples,
+    #     z=cfg.z,
+    #     device=cfg.device,
+    # )
 
-    # -- Test against MILP
-    graph = graphs[0].squeeze().cpu()
-    milp_path = sop_milp_solver(graph, time_limit=180, num_samples=cfg.num_samples)
+    # # -- Test against MILP
+    # graph = graphs[0].squeeze().cpu()
+    # milp_path = sop_milp_solver(graph, time_limit=180, num_samples=cfg.num_samples)
 
     # print(
     #     "hardcoded failure_prob",
@@ -171,21 +184,21 @@ def main(cfg: Config) -> None:
     #     evaluate_path(milp_path, graph.unsqueeze(0), cfg.num_samples, cfg.kappa),
     # )
 
-    plot_solutions(
-        graphs[0],
-        paths=[
-            random_paths[0],
-            hardcoded_paths[0],
-            milp_path[0],
-        ],
-        titles=[
-            f"Random Reward: {random_paths.reward.sum(-1)[0]:.5f}",
-            f"Hardcoded Reward: {hardcoded_paths.reward.sum(-1)[0]:.5f}",
-            f"Milp Reward: {milp_path.reward.sum(-1)[0]:.5f}",
-        ],
-        rows=1,
-        cols=3,
-    )
+    # plot_solutions(
+    #     graphs[0],
+    #     paths=[
+    #         random_paths[0],
+    #         hardcoded_paths[0],
+    #         milp_path[0],
+    #     ],
+    #     titles=[
+    #         f"Random Reward: {random_paths.reward.sum(-1)[0]:.5f}",
+    #         f"Hardcoded Reward: {hardcoded_paths.reward.sum(-1)[0]:.5f}",
+    #         f"Milp Reward: {milp_path.reward.sum(-1)[0]:.5f}",
+    #     ],
+    #     rows=1,
+    #     cols=3,
+    # )
 
 
 if __name__ == "__main__":

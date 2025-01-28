@@ -58,3 +58,9 @@ After you've added this, make sure to `source` your rc file.
 make build
 make bash
 ```
+
+## Execution
+This will run `improve_heuristic.py`.
+```bash
+make run
+```

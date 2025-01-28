@@ -1,3 +1,4 @@
+from typing_extensions import Self
 import torch
 from tensordict import tensorclass, TensorDict
 
@@ -11,6 +12,15 @@ class TorchGraph:
     def size(self, key="adj"):
         "Returns size of graph as (batch_size, num_nodes)"
         return self.edges[key].size(0), self.edges[key].size(-1)
+
+    def export(self, path: str) -> None:
+        torch.save(self, path)
+
+    @staticmethod
+    def load(path: str, device) -> Self:
+        tg = torch.load(path, map_location=device)
+
+        return tg
 
 
 def generate_random_graph_batch(
