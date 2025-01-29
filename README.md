@@ -4,8 +4,10 @@ Stochastic orienteering problem self-play pipeline leveraging GNNs with MCTS
 
 TODO List:
 
-- [ ] MCTS Implementation
-- [ ] GNN Implementation in PyTorch
+- [ ] Add support for torch dataloader
+- [ ] MILP script, maybe add multithreading
+- [ ] Proper experiment pipeline
+- [ ] MCTS ACO Implementation
 
 ## Installation
 
