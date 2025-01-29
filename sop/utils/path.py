@@ -1,4 +1,6 @@
 from typing import Optional
+from typing_extensions import Self
+
 import torch
 from torch import Tensor
 from tensordict import tensorclass
@@ -50,7 +52,7 @@ class Path:
         torch.save(self, path)
 
     @staticmethod
-    def load(path: str, device) -> Self:
-        tg = torch.load(path, map_location=device)
+    def load(path: str) -> Self:
+        tg = torch.load(path)
 
         return tg

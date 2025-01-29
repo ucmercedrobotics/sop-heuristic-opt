@@ -64,3 +64,15 @@ This will run `improve_heuristic.py`.
 ```bash
 make run
 ```
+
+To generate a dataset
+```bash
+make dataset
+```
+You can find the outputs in `data/`.
+
+## Source Control
+To use precommit checks, make sure that you install `pre-commit` and initialize your repo.
+If you're using Linux you can `make repo-init` and it will install all hooks into your local `.git` folder.
+If not, install `pre-commit` and then `pre-commit install` to initialize the repo.
+For example on Mac, `brew install pre-commit` will do the trick.

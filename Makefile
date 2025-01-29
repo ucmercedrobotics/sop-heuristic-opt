@@ -16,6 +16,9 @@ bash:
 	${CONTAINER_NAME} \
 	/bin/bash
 
+clean:
+	rm -rf data outputs
+
 run:
 	python sop/scripts/improve_heuristic.py
 

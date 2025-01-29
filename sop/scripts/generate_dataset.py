@@ -25,7 +25,7 @@ class Config:
     # Dataset
     dataset_dir: str = "data"
     # Batch
-    batch_size: int = 32
+    batch_size: int = 8
     device: str = DEVICE
     # Graph
     num_nodes: int = 20
@@ -74,7 +74,7 @@ def main(cfg: Config) -> None:
     graphs: TorchGraph = generate_sop_graphs(cfg)
     # get time for stamping graph export file
     current_datetime: str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    # NOTE: current format of path is <time>_dataset_<batch_size>_<graph_size>
+    # NOTE: current format of graph dataset path is <time>_dataset_<batch_size>_<graph_size>
     graph_path: str = (
         cfg.dataset_dir
         + "/"
@@ -87,7 +87,7 @@ def main(cfg: Config) -> None:
         + str(cfg.num_nodes)
     )
     graphs.export(graph_path)
-    print(f"Graphs generated at {graph_path}...")
+    print(f"Graphs Tensors generated at {graph_path}...")
 
     # -- Heuristic Creation
     # -- TODO: GNN heuristic
@@ -122,6 +122,20 @@ def main(cfg: Config) -> None:
     # # -- Test against MILP
     graph = graphs[0].squeeze().cpu()
     milp_path = sop_milp_solver(graph, time_limit=60, num_samples=cfg.num_samples)
+    # NOTE: current format of path is <time>_dataset_<batch_size>_<graph_size>
+    milp_export_path: str = (
+        cfg.dataset_dir
+        + "/"
+        + current_datetime
+        + "_"
+        + "milp_paths"
+        + "_"
+        + str(cfg.batch_size)
+        + "_"
+        + str(cfg.num_nodes)
+    )
+    milp_path.export(milp_export_path)
+    print(f"MILP Path Tensors generated at {milp_export_path}...")
 
     viz_path: str = cfg.dataset_dir + "/viz/"
     print(f"Creating vizualization folder {viz_path}...")
