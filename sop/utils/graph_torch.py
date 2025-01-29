@@ -1,5 +1,12 @@
+from typing_extensions import Self
 import torch
 from tensordict import tensorclass, TensorDict
+
+import rootutils
+
+root = rootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
+
+from sop.utils.sample import sample_costs
 
 
 @tensorclass
@@ -12,13 +19,38 @@ class TorchGraph:
         "Returns size of graph as (batch_size, num_nodes)"
         return self.edges[key].size(0), self.edges[key].size(-1)
 
+    def export(self, path: str) -> None:
+        torch.save(self, path)
 
-def generate_random_graph_batch(
-    batch_size: int, num_nodes: int, device: str = "cpu"
+    @staticmethod
+    def load(path: str) -> Self:
+        tg = torch.load(path, weights_only=False)
+
+        return tg
+
+
+# -- Graph Generation
+def generate_sop_graphs(
+    batch_size: int,
+    num_nodes: int,
+    start_node: int,
+    goal_node: int,
+    budget: float,
+    num_samples: int,
+    kappa: float,
 ) -> TorchGraph:
+    graphs = generate_random_graph_batch(batch_size, num_nodes)
+    graphs.extra["start_node"] = torch.full((batch_size,), start_node)
+    graphs.extra["goal_node"] = torch.full((batch_size,), goal_node)
+    graphs.extra["budget"] = torch.full((batch_size,), budget, dtype=torch.float32)
+    graphs.edges["samples"] = sample_costs(graphs.edges["distance"], num_samples, kappa)
+    return graphs
+
+
+def generate_random_graph_batch(batch_size: int, num_nodes: int) -> TorchGraph:
     # Create Nodes
-    positions = generate_uniform_positions(size=(batch_size, num_nodes), device=device)
-    rewards = generate_uniform_reward(size=(batch_size, num_nodes), device=device)
+    positions = generate_uniform_positions(size=(batch_size, num_nodes))
+    rewards = generate_uniform_reward(size=(batch_size, num_nodes))
 
     # Convert from (B, 2, N) -> (B, N, 2)
     positions = positions.permute(0, 2, 1)
@@ -31,39 +63,36 @@ def generate_random_graph_batch(
     nodes = TensorDict(
         {"position": positions, "reward": rewards},
         batch_size=[batch_size],
-        device=device,
     )
 
     edges = TensorDict(
         {"adj": adj, "distance": edge_distances},
         batch_size=[batch_size],
-        device=device,
     )
 
     # Extra dict for information like start_node and budget
-    extra = TensorDict({}, batch_size=[batch_size], device=device)
+    extra = TensorDict({}, batch_size=[batch_size])
 
     return TorchGraph(
         nodes=nodes,
         edges=edges,
         extra=extra,
         batch_size=[batch_size],
-        device=device,
     )
 
 
 # -- Position
-def generate_uniform_positions(size: tuple[int], device: str = "cpu") -> torch.Tensor:
+def generate_uniform_positions(size: tuple[int]) -> torch.Tensor:
     """Creates 2D positions for each node in the graph."""
-    xs = torch.rand(size, device=device)  # (...size,)
-    ys = torch.rand(size, device=device)  # (...size,)
+    xs = torch.rand(size)  # (...size,)
+    ys = torch.rand(size)  # (...size,)
     return torch.stack([xs, ys], dim=-2)  # (2, size...)
 
 
 # -- Reward
-def generate_uniform_reward(size: tuple, device: str = "cpu") -> torch.Tensor:
+def generate_uniform_reward(size: tuple) -> torch.Tensor:
     """Computes random reward for each node in the graph."""
-    return torch.rand(size, device=device)
+    return torch.rand(size)
 
 
 # -- Edges

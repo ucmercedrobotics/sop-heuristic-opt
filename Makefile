@@ -1,7 +1,11 @@
 CONTAINER_NAME := sop-opt
 APP_NAME := sop-opt
 
-build: 
+repo-init:
+	sudo apt install pre-commit && \
+	pre-commit install
+
+build:
 	docker build . -t ${CONTAINER_NAME} --target local
 
 bash:
@@ -11,3 +15,12 @@ bash:
 	-v $(shell pwd):/${APP_NAME} \
 	${CONTAINER_NAME} \
 	/bin/bash
+
+clean:
+	rm -rf data outputs
+
+run:
+	python sop/scripts/improve_heuristic.py
+
+dataset:
+	python sop/scripts/generate_dataset.py

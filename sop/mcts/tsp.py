@@ -16,7 +16,6 @@ def tsp_greedy_gnn_solver(
     model: nn.Module,
     graph: TorchGraph,
     start_graph_node: Tensor,
-    device: str = "cpu",
 ) -> Path:
     batch_size, num_nodes = graph.size()
     indices = torch.arange(batch_size)
@@ -24,10 +23,8 @@ def tsp_greedy_gnn_solver(
     goal_graph_node = start_graph_node.clone()
     current_graph_node = start_graph_node.clone()
 
-    path = Path.empty(batch_size, num_nodes, device)
-    path.append(
-        indices, current_graph_node, reward=torch.zeros((batch_size,), device=device)
-    )
+    path = Path.empty(batch_size, num_nodes)
+    path.append(indices, current_graph_node, reward=torch.zeros((batch_size,)))
 
     for step in tqdm(range(num_nodes)):
         if step < num_nodes - 1:
@@ -51,7 +48,6 @@ def tsp_mcts_gnn_solver(
     num_simulations: int,
     discount: float = 0.99,
     z: float = 0.1,
-    device: str = "cpu",
 ) -> Path:
     batch_size, num_nodes = graph.size()
     indices = torch.arange(batch_size)
@@ -59,11 +55,9 @@ def tsp_mcts_gnn_solver(
     goal_graph_node = start_graph_node.clone()
     current_graph_node = start_graph_node.clone()
 
-    path = Path.empty(batch_size, num_nodes, device)
-    path.append(
-        indices, current_graph_node, reward=torch.zeros((batch_size,), device=device)
-    )
-    summary = TreeStats.empty(batch_size, num_nodes, device)
+    path = Path.empty(batch_size, num_nodes)
+    path.append(indices, current_graph_node, reward=torch.zeros((batch_size,)))
+    summary = TreeStats.empty(batch_size, num_nodes)
 
     for step in tqdm(range(num_nodes)):
         if step < num_nodes - 1:
@@ -102,13 +96,10 @@ def MCTS_TSP(
     num_simulations: int,
     discount: float,
     z: float,
-    device: str,
 ):
     batch_size, num_nodes = graph.size()
 
-    tree = Tree.instantiate_from_root(
-        current_graph_node, graph, num_simulations, device
-    )
+    tree = Tree.instantiate_from_root(current_graph_node, graph, num_simulations)
 
     def tsp_scoring_fn(indices, tree, current_tree_node):
         return compute_ucb(indices, tree, current_tree_node, z)
@@ -241,7 +232,9 @@ def create_node_features(
             F.one_hot(goal, num_classes=2),
         ],
         dim=-1,
-    ).to(torch.float32)  # [B, N, 4]
+    ).to(
+        torch.float32
+    )  # [B, N, 4]
 
 
 def create_edge_features(
@@ -284,7 +277,7 @@ def create_adj_matrix(mask: Tensor) -> Tensor:
 
     # Set diagonal to zero
     _, N = mask.shape
-    eye = torch.eye(N, device=mask.device).bool()  # Identity matrix of shape [N, N]
+    eye = torch.eye(N).bool()  # Identity matrix of shape [N, N]
     adj = adj.masked_fill(eye, 0)
     return adj
 

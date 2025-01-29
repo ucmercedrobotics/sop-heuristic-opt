@@ -1,4 +1,6 @@
 from typing import Optional
+from typing_extensions import Self
+
 import torch
 from torch import Tensor
 from tensordict import tensorclass
@@ -16,16 +18,15 @@ class Path:
     length: Tensor  # [B,]
 
     @classmethod
-    def empty(cls, batch_size: int, num_nodes: int, device: str = "cpu"):
+    def empty(cls, batch_size: int, num_nodes: int):
         max_size = (batch_size, num_nodes + 1)
         mask_size = (batch_size, num_nodes)
         return cls(
-            nodes=torch.full(max_size, UNVISITED, dtype=torch.long, device=device),
-            reward=torch.zeros(max_size, dtype=torch.float32, device=device),
-            mask=torch.zeros(mask_size, dtype=torch.bool, device=device),
-            length=torch.zeros((batch_size,), dtype=torch.long, device=device),
+            nodes=torch.full(max_size, UNVISITED, dtype=torch.long),
+            reward=torch.zeros(max_size, dtype=torch.float32),
+            mask=torch.zeros(mask_size, dtype=torch.bool),
+            length=torch.zeros((batch_size,), dtype=torch.long),
             batch_size=[batch_size],
-            device=device,
         )
 
     def size(self):
@@ -46,3 +47,12 @@ class Path:
 
         self.mask[indices, node] = 1
         self.length[indices] += 1
+
+    def export(self, path: str) -> None:
+        torch.save(self, path)
+
+    @staticmethod
+    def load(path: str) -> Self:
+        tg = torch.load(path, weights_only=False)
+
+        return tg
