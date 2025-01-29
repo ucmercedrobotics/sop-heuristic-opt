@@ -53,6 +53,6 @@ class Path:
 
     @staticmethod
     def load(path: str) -> Self:
-        tg = torch.load(path)
+        tg = torch.load(path, weights_only=False)
 
         return tg

@@ -2,6 +2,12 @@ from typing_extensions import Self
 import torch
 from tensordict import tensorclass, TensorDict
 
+import rootutils
+
+root = rootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
+
+from sop.utils.sample import sample_costs
+
 
 @tensorclass
 class TorchGraph:
@@ -18,9 +24,27 @@ class TorchGraph:
 
     @staticmethod
     def load(path: str) -> Self:
-        tg = torch.load(path)
+        tg = torch.load(path, weights_only=False)
 
         return tg
+
+
+# -- Graph Generation
+def generate_sop_graphs(
+    batch_size: int,
+    num_nodes: int,
+    start_node: int,
+    goal_node: int,
+    budget: float,
+    num_samples: int,
+    kappa: float,
+) -> TorchGraph:
+    graphs = generate_random_graph_batch(batch_size, num_nodes)
+    graphs.extra["start_node"] = torch.full((batch_size,), start_node)
+    graphs.extra["goal_node"] = torch.full((batch_size,), goal_node)
+    graphs.extra["budget"] = torch.full((batch_size,), budget, dtype=torch.float32)
+    graphs.edges["samples"] = sample_costs(graphs.edges["distance"], num_samples, kappa)
+    return graphs
 
 
 def generate_random_graph_batch(batch_size: int, num_nodes: int) -> TorchGraph:

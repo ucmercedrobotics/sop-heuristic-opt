@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 import os
+from datetime import datetime
 
 import hydra
 from hydra.core.config_store import ConfigStore
@@ -8,7 +9,7 @@ import rootutils
 
 root = rootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
 
-from sop.utils.graph_torch import TorchGraph, generate_random_graph_batch
+from sop.utils.graph_torch import TorchGraph, generate_sop_graphs
 from sop.utils.sample import sample_costs
 from sop.mcts.sop2 import sop_mcts_solver, random_heuristic, mcts_sopcc_heuristic
 from sop.milp.pulp_milp_sop import sop_milp_solver
@@ -21,10 +22,12 @@ DEVICE: str = "cuda" if torch.cuda.is_available() else "cpu"
 # -- Config
 @dataclass
 class Config:
-    # Dataset
+    # Data
     dataset_dir: str = "data"
+    visual_dir: str = "viz"
+    timestamp: str = "2025-01-29_01-11-08"
     # Batch
-    batch_size: int = 64
+    batch_size: int = 8
     device: str = DEVICE
     # Graph
     num_nodes: int = 20
@@ -41,28 +44,6 @@ class Config:
 
 cs = ConfigStore.instance()
 cs.store(name="improve_heuristic", node=Config)
-
-
-# -- Graph Generation
-def generate_sop_graphs(cfg: Config) -> TorchGraph:
-    graphs = generate_random_graph_batch(cfg.batch_size, cfg.num_nodes)
-    graphs.extra["start_node"] = torch.full(
-        (cfg.batch_size,),
-        cfg.start_node,
-    )
-    graphs.extra["goal_node"] = torch.full(
-        (cfg.batch_size,),
-        cfg.goal_node,
-    )
-    graphs.extra["budget"] = torch.full(
-        (cfg.batch_size,),
-        cfg.budget,
-        dtype=torch.float32,
-    )
-    graphs.edges["samples"] = sample_costs(
-        graphs.edges["distance"], cfg.num_samples, cfg.kappa
-    )
-    return graphs
 
 
 # -- Evaluate Path
@@ -101,8 +82,33 @@ def main(cfg: Config) -> None:
     torch.set_default_device(cfg.device)
 
     # -- Generate Data
-    print("Generating graphs...")
-    graphs = generate_sop_graphs(cfg)
+    # TODO: if file exists, import
+    # TODO: if we begin to have multiple experiments of the same time, we can add more flags to the path
+    expected_graph_tensor_path: str = (
+        cfg.dataset_dir
+        + "/"
+        + cfg.timestamp
+        + "_graphs_"
+        + str(cfg.batch_size)
+        + "_"
+        + str(cfg.num_nodes)
+    )
+    if os.path.isfile(expected_graph_tensor_path):
+        print(f"Loading graphs from {expected_graph_tensor_path}...")
+        graphs: TorchGraph = TorchGraph.load(expected_graph_tensor_path)
+        timestamp: str = cfg.timestamp
+    else:
+        print(f"Generating {cfg.batch_size} graphs...")
+        graphs: TorchGraph = generate_sop_graphs(
+            cfg.batch_size,
+            cfg.num_nodes,
+            cfg.start_node,
+            cfg.goal_node,
+            cfg.budget,
+            cfg.num_samples,
+            cfg.kappa,
+        )
+        timestamp: str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
     # -- Heuristic Creation
     # -- TODO: GNN heuristic
@@ -136,7 +142,7 @@ def main(cfg: Config) -> None:
 
     # -- Test against MILP
     graph = graphs[0].squeeze().cpu()
-    milp_path = sop_milp_solver(graph, time_limit=180, num_samples=cfg.num_samples)
+    milp_path = sop_milp_solver(graph, time_limit=60, num_samples=cfg.num_samples)
 
     # print(
     #     "hardcoded failure_prob",
@@ -161,13 +167,13 @@ def main(cfg: Config) -> None:
     #     evaluate_path(milp_path, graph.unsqueeze(0), cfg.num_samples, cfg.kappa),
     # )
 
-    viz_path: str = cfg.dataset_dir + "/viz/"
+    viz_path: str = cfg.dataset_dir + "/" + cfg.visual_dir + "/"
     print(f"Creating vizualization folder {viz_path}...")
     os.makedirs(viz_path, exist_ok=True)
 
     plot_solutions(
-        viz_path + "improve_",
-        graphs[0],
+        viz_path + timestamp + "_",
+        graphs[0].cpu(),
         paths=[
             random_paths[0],
             hardcoded_paths[0],
