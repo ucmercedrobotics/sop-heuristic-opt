@@ -10,13 +10,23 @@ from sop.utils.graph_torch import TorchGraph
 from sop.utils.sample import sample_costs
 
 
+# generates random probability of selecting particular edge, as in random rollout
+def random_heuristic(batch_size: int, num_nodes: int):
+    return torch.rand((batch_size, num_nodes, num_nodes)).softmax(-1)
+
+
+# generates average utility (reward/average cost) for edges, as in MCTSSOPCC
+def mcts_sopcc_heuristic(rewards: Tensor, sampled_costs: Tensor):
+    average_cost = sampled_costs.mean(dim=-1)
+    return rewards.unsqueeze(-1) / average_cost
+
+
 def sop_mcts_solver(
     graph: TorchGraph,
     heuristic: Tensor,
     num_simulations: int,
     num_rollouts: int,
     z: float,
-    device: str = "cpu",
 ) -> Tuple[Path, Tensor]:
     batch_size, num_nodes = graph.size()
 
@@ -26,7 +36,7 @@ def sop_mcts_solver(
 
     # Loop State
     indices = torch.arange(batch_size)
-    path = Path.empty(batch_size, num_nodes, device)
+    path = Path.empty(batch_size, num_nodes)
     path.append(indices, current_node)
 
     while indices.numel() > 0:
@@ -39,7 +49,6 @@ def sop_mcts_solver(
             num_simulations,
             num_rollouts,
             z,
-            device,
         )
         is_invalid = score == -torch.inf
         invalid_i = indices[is_invalid]
@@ -78,9 +87,8 @@ def MCTS_SOPCC(
     num_simulations: int,
     num_rollouts: int,
     z: float,
-    device: str = "cpu",
 ) -> Tuple[Tensor, Tensor]:
-    tree = Tree.instantiate_from_root(current_node, graph, num_simulations, device)
+    tree = Tree.instantiate_from_root(current_node, graph, num_simulations)
     for k in range(num_simulations):
         # s = time.time()
         parent_tree_node, new_graph_node, tree_path, is_expanded, is_finished = select(
@@ -139,7 +147,6 @@ class Tree:
         root_graph_node: Tensor,
         graph: TorchGraph,
         num_simulations: int,
-        device: str,
     ) -> "Tree":
         batch_size, num_nodes = graph.size()
         num_simulations = num_simulations * num_nodes + 1
@@ -161,7 +168,6 @@ class Tree:
             children_failure_probs=torch.zeros(max_children, dtype=torch.float32),
             num_nodes=torch.ones((batch_size,), dtype=torch.long),
             batch_size=[batch_size],
-            device=device,
         )
 
         tree.node_mapping[:, ROOT_INDEX] = root_graph_node

@@ -118,7 +118,7 @@ class DenseGATConv(torch.nn.Module):
 
         if add_loop:
             adj = adj.clone()
-            idx = torch.arange(N, dtype=torch.long, device=adj.device)
+            idx = torch.arange(N, dtype=torch.long)
             adj[:, idx, idx] = 1.0
 
         x = self.lin(x).view(B, N, H, C)  # [B, N, H, C]

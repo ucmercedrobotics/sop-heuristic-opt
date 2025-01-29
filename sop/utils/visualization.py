@@ -11,6 +11,7 @@ from sop.mcts.core import Tree
 
 
 def plot_solutions(
+    out_path: str,
     graph: TorchGraph,
     paths: list[Path],
     titles: list[str],
@@ -60,7 +61,7 @@ def plot_solutions(
         fig.delaxes(axes[i])  # Removes empty subplot spaces
 
     plt.tight_layout()
-    plt.show()
+    plt.savefig(out_path + "comp.png")
 
 
 def plot_tree(tree: Tree):

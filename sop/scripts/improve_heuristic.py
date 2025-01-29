@@ -1,16 +1,16 @@
 from dataclasses import dataclass
+import os
+
 import hydra
 from hydra.core.config_store import ConfigStore
-
 import torch
-
 import rootutils
 
 root = rootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
 
 from sop.utils.graph_torch import TorchGraph, generate_random_graph_batch
 from sop.utils.sample import sample_costs
-from sop.mcts.sop2 import sop_mcts_solver
+from sop.mcts.sop2 import sop_mcts_solver, random_heuristic, mcts_sopcc_heuristic
 from sop.milp.pulp_milp_sop import sop_milp_solver
 from sop.utils.visualization import plot_solutions
 from sop.utils.path import Path
@@ -21,6 +21,8 @@ DEVICE: str = "cuda" if torch.cuda.is_available() else "cpu"
 # -- Config
 @dataclass
 class Config:
+    # Dataset
+    dataset_dir: str = "data"
     # Batch
     batch_size: int = 64
     device: str = DEVICE
@@ -28,7 +30,7 @@ class Config:
     num_nodes: int = 20
     budget: int = 2
     start_node: int = 1
-    goal_node: int = 2
+    goal_node: int = 19
     # Sampling
     num_samples: int = 100
     kappa: float = 0.5
@@ -43,32 +45,24 @@ cs.store(name="improve_heuristic", node=Config)
 
 # -- Graph Generation
 def generate_sop_graphs(cfg: Config) -> TorchGraph:
-    graphs = generate_random_graph_batch(cfg.batch_size, cfg.num_nodes, cfg.device)
+    graphs = generate_random_graph_batch(cfg.batch_size, cfg.num_nodes)
     graphs.extra["start_node"] = torch.full(
-        (cfg.batch_size,), cfg.start_node, device=cfg.device
+        (cfg.batch_size,),
+        cfg.start_node,
     )
     graphs.extra["goal_node"] = torch.full(
-        (cfg.batch_size,), cfg.goal_node, device=cfg.device
+        (cfg.batch_size,),
+        cfg.goal_node,
     )
     graphs.extra["budget"] = torch.full(
-        (cfg.batch_size,), cfg.budget, dtype=torch.float32, device=cfg.device
+        (cfg.batch_size,),
+        cfg.budget,
+        dtype=torch.float32,
     )
     graphs.edges["samples"] = sample_costs(
-        graphs.edges["distance"], cfg.num_samples, cfg.kappa, cfg.device
+        graphs.edges["distance"], cfg.num_samples, cfg.kappa
     )
     return graphs
-
-
-# -- Heuristics
-def random_heuristic(batch_size: int, num_nodes: int, device: str = "cpu"):
-    return torch.rand((batch_size, num_nodes, num_nodes), device=device).softmax(-1)
-
-
-def mcts_sopcc_heuristic(
-    rewards: torch.Tensor, sampled_costs: torch.Tensor, device: str = "cpu"
-):
-    average_cost = sampled_costs.mean(dim=-1)
-    return rewards.unsqueeze(-1) / average_cost
 
 
 # -- Evaluate Path
@@ -115,10 +109,8 @@ def main(cfg: Config) -> None:
     # -- TODO: Gflownet heuristic
     # -- TODO: bayesian heuristic
     print("Computing Heuristics...")
-    random_H = random_heuristic(cfg.batch_size, cfg.num_nodes, cfg.device)
-    computed_H = mcts_sopcc_heuristic(
-        graphs.nodes["reward"], graphs.edges["samples"], cfg.device
-    )
+    random_H = random_heuristic(cfg.batch_size, cfg.num_nodes)
+    computed_H = mcts_sopcc_heuristic(graphs.nodes["reward"], graphs.edges["samples"])
 
     # -- MCTS Improvement
     # -- TODO: pUCT
@@ -131,7 +123,6 @@ def main(cfg: Config) -> None:
         num_simulations=cfg.num_simulations,
         num_rollouts=cfg.num_samples,
         z=cfg.z,
-        device=cfg.device,
     )
 
     print("Generating Hardcoded Paths...")
@@ -141,7 +132,6 @@ def main(cfg: Config) -> None:
         num_simulations=cfg.num_simulations,
         num_rollouts=cfg.num_samples,
         z=cfg.z,
-        device=cfg.device,
     )
 
     # -- Test against MILP
@@ -171,7 +161,12 @@ def main(cfg: Config) -> None:
     #     evaluate_path(milp_path, graph.unsqueeze(0), cfg.num_samples, cfg.kappa),
     # )
 
+    viz_path: str = cfg.dataset_dir + "/viz/"
+    print(f"Creating vizualization folder {viz_path}...")
+    os.makedirs(viz_path, exist_ok=True)
+
     plot_solutions(
+        viz_path + "improve_",
         graphs[0],
         paths=[
             random_paths[0],

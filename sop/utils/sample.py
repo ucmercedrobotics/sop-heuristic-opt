@@ -3,9 +3,7 @@ from torch import Tensor
 import time
 
 
-def sample_exponential_distribution(
-    rate: Tensor, num_samples: int, device: str = "cpu"
-) -> Tensor:
+def sample_exponential_distribution(rate: Tensor, num_samples: int) -> Tensor:
     """Faster Exponential distribution w/ https://en.wikipedia.org/wiki/Inverse_transform_sampling.
     x = -(1/rate)*ln(y)
     """
@@ -15,11 +13,9 @@ def sample_exponential_distribution(
     return samples
 
 
-def sample_costs(
-    weights: Tensor, num_samples: int, kappa: float = 0.5, device: str = "cpu"
-) -> Tensor:
+def sample_costs(weights: Tensor, num_samples: int, kappa: float = 0.5) -> Tensor:
     rate = 1 / ((1 - kappa) * weights)
-    samples = sample_exponential_distribution(rate, num_samples, device)
+    samples = sample_exponential_distribution(rate, num_samples)
     sampled_costs = (kappa * weights).unsqueeze(-1) + samples
     return sampled_costs
 

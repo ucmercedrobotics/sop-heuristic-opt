@@ -55,7 +55,6 @@ class Tree:
         root_graph_node: Tensor,
         graph: TorchGraph,
         num_simulations: int,
-        device: str,
     ) -> "Tree":
         batch_size, num_nodes = graph.size()
         num_simulations = num_simulations * num_nodes + 1
@@ -75,7 +74,6 @@ class Tree:
             children_Q_values=torch.full(max_children, -torch.inf, dtype=torch.float32),
             num_nodes=torch.ones((batch_size,), dtype=torch.long),
             batch_size=[batch_size],
-            device=device,
         )
 
         tree.node_mapping[:, ROOT_INDEX] = root_graph_node

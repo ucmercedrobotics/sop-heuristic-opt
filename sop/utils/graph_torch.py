@@ -23,12 +23,10 @@ class TorchGraph:
         return tg
 
 
-def generate_random_graph_batch(
-    batch_size: int, num_nodes: int, device: str = "cpu"
-) -> TorchGraph:
+def generate_random_graph_batch(batch_size: int, num_nodes: int) -> TorchGraph:
     # Create Nodes
-    positions = generate_uniform_positions(size=(batch_size, num_nodes), device=device)
-    rewards = generate_uniform_reward(size=(batch_size, num_nodes), device=device)
+    positions = generate_uniform_positions(size=(batch_size, num_nodes))
+    rewards = generate_uniform_reward(size=(batch_size, num_nodes))
 
     # Convert from (B, 2, N) -> (B, N, 2)
     positions = positions.permute(0, 2, 1)
@@ -41,39 +39,36 @@ def generate_random_graph_batch(
     nodes = TensorDict(
         {"position": positions, "reward": rewards},
         batch_size=[batch_size],
-        device=device,
     )
 
     edges = TensorDict(
         {"adj": adj, "distance": edge_distances},
         batch_size=[batch_size],
-        device=device,
     )
 
     # Extra dict for information like start_node and budget
-    extra = TensorDict({}, batch_size=[batch_size], device=device)
+    extra = TensorDict({}, batch_size=[batch_size])
 
     return TorchGraph(
         nodes=nodes,
         edges=edges,
         extra=extra,
         batch_size=[batch_size],
-        device=device,
     )
 
 
 # -- Position
-def generate_uniform_positions(size: tuple[int], device: str = "cpu") -> torch.Tensor:
+def generate_uniform_positions(size: tuple[int]) -> torch.Tensor:
     """Creates 2D positions for each node in the graph."""
-    xs = torch.rand(size, device=device)  # (...size,)
-    ys = torch.rand(size, device=device)  # (...size,)
+    xs = torch.rand(size)  # (...size,)
+    ys = torch.rand(size)  # (...size,)
     return torch.stack([xs, ys], dim=-2)  # (2, size...)
 
 
 # -- Reward
-def generate_uniform_reward(size: tuple, device: str = "cpu") -> torch.Tensor:
+def generate_uniform_reward(size: tuple) -> torch.Tensor:
     """Computes random reward for each node in the graph."""
-    return torch.rand(size, device=device)
+    return torch.rand(size)
 
 
 # -- Edges
