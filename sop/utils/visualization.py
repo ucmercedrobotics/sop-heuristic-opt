@@ -1,5 +1,6 @@
 from typing import Optional
 import matplotlib.pyplot as plt
+import numpy as np
 import graphviz
 import torch
 
@@ -12,10 +13,10 @@ from sop.mcts.core import Tree
 
 
 def plot_solutions(
-    out_path: Optional[str],
     graph: TorchGraph,
     paths: list[Path],
     titles: list[str],
+    out_path: Optional[str] = None,
     rows: int = 1,
     cols: int = 2,
 ):
@@ -60,6 +61,69 @@ def plot_solutions(
 
     # Hide unused subplots
     for i in range(len(paths), len(axes)):
+        fig.delaxes(axes[i])  # Removes empty subplot spaces
+
+    plt.tight_layout()
+    if out_path is not None:
+        plt.savefig(out_path)
+    else:
+        plt.show()
+
+
+def heatmap(data, ax=None, cbar_kw=None, cbarlabel="", **kwargs):
+    """
+    Create a heatmap from a numpy array and two lists of labels.
+    Taken from: https://matplotlib.org/stable/gallery/images_contours_and_fields/image_annotated_heatmap.html
+    """
+
+    if ax is None:
+        ax = plt.gca()
+
+    if cbar_kw is None:
+        cbar_kw = {}
+
+    # Plot the heatmap
+    im = ax.imshow(data, **kwargs)
+
+    # Create colorbar
+    cbar = ax.figure.colorbar(im, ax=ax, **cbar_kw)
+    cbar.ax.set_ylabel(cbarlabel, rotation=-90, va="bottom")
+
+    # Let the horizontal axes labeling appear on top.
+    ax.tick_params(top=True, bottom=False, labeltop=True, labelbottom=False)
+
+    # Turn spines off and create white grid.
+    ax.spines[:].set_visible(False)
+
+    ax.set_xticks(np.arange(data.shape[1] + 1) - 0.5, minor=True)
+    ax.set_yticks(np.arange(data.shape[0] + 1) - 0.5, minor=True)
+    ax.grid(which="minor", color="w", linestyle="-", linewidth=3)
+    ax.tick_params(which="minor", bottom=False, left=False)
+
+    return im, cbar
+
+
+def plot_heuristics(
+    heuristics: list[torch.Tensor],
+    titles: list[str],
+    out_path: Optional[str] = None,
+    rows: int = 1,
+    cols: int = 2,
+):
+    assert len(heuristics) == len(titles)
+
+    fig, axes = plt.subplots(rows, cols, figsize=(12, 8))
+    if len(heuristics) == 1:
+        axes = [axes]
+
+    for i, (H, title) in enumerate(zip(heuristics, titles)):
+        ax = axes[i]
+        im, cbar = heatmap(H, ax=ax, cmap="YlGn", cbarlabel="Score")
+
+        ax.set_title(title)
+
+    # Hide unused subplots
+    for i in range(len(heuristics), len(axes)):
         fig.delaxes(axes[i])  # Removes empty subplot spaces
 
     plt.tight_layout()

@@ -11,9 +11,14 @@ root = rootutils.setup_root(__file__, indicator=".project-root", pythonpath=True
 
 from sop.utils.graph_torch import TorchGraph, generate_sop_graphs
 from sop.utils.sample import sample_costs
-from sop.mcts.sop2 import sop_mcts_solver, random_heuristic, mcts_sopcc_heuristic
+from sop.mcts.sop2 import (
+    sop_mcts_solver,
+    sop_mcts_aco_solver,
+    random_heuristic,
+    mcts_sopcc_heuristic,
+)
 from sop.milp.pulp_milp_sop import sop_milp_solver
-from sop.utils.visualization import plot_solutions
+from sop.utils.visualization import plot_solutions, plot_heuristics
 from sop.utils.path import Path
 
 DEVICE: str = "cuda" if torch.cuda.is_available() else "cpu"
@@ -39,7 +44,7 @@ class Config:
     kappa: float = 0.5
     # MCTS
     num_simulations: int = 100
-    z: float = 0.1
+    z: float = 0.5
 
 
 cs = ConfigStore.instance()
@@ -75,6 +80,29 @@ def evaluate_path(
     residual_budget = budget - total_sampled_cost
 
     return (residual_budget < 0).sum(-1) / num_samples, total_sampled_cost.mean(-1)
+
+
+def path_to_heatmap(path: Path) -> torch.Tensor:
+    batch_size, max_length = path.size()
+    indices = torch.arange(batch_size)
+
+    num_nodes = max_length - 1
+    heatmap = torch.zeros((batch_size, num_nodes, num_nodes))
+
+    path_index = 1
+    while path_index < max_length:
+        prev_node = path.nodes[indices, path_index - 1]
+        current_node = path.nodes[indices, path_index]
+        heatmap[indices, prev_node, current_node] = 1
+
+        is_continuing = current_node != -1
+        indices = indices[is_continuing]
+        if indices.numel() == 0:
+            break
+
+        path_index += 1
+
+    return heatmap
 
 
 # -- Main Script
@@ -123,8 +151,8 @@ def main(cfg: Config) -> None:
     # -- TODO: pUCT
     # -- TODO: Gumbel Muzero
     # -- TODO: Thompson Sampling
-    print("Generating Random Paths...")
-    random_paths, is_success = sop_mcts_solver(
+    print("Generating MCTS+ACO Paths...")
+    aco_paths, is_success, current_budget = sop_mcts_solver(
         graph=graphs,
         heuristic=random_H,
         num_simulations=cfg.num_simulations,
@@ -132,19 +160,20 @@ def main(cfg: Config) -> None:
         z=cfg.z,
     )
     failure_prob, avg_cost = evaluate_path(
-        random_paths[0].unsqueeze(0),
+        aco_paths[0].unsqueeze(0),
         graphs[0].unsqueeze(0),
         cfg.num_samples,
         cfg.kappa,
     )
-    random_info = (
-        "Random; "
-        + f"R: {random_paths.reward.sum(-1)[0]:.5f}, "
+    aco_info = (
+        "MCTS+ACO; "
+        + f"R: {aco_paths.reward.sum(-1)[0]:.5f}, "
         + f"B: {cfg.budget}, "
         + f"C: {float(avg_cost):.5f}, "
         + f"F: {float(failure_prob)} "
+        + f"N: {int(aco_paths.length[0])}"
     )
-    print(random_info)
+    print(aco_info)
 
     print("Generating Hardcoded Paths...")
     hardcoded_paths, is_success = sop_mcts_solver(
@@ -193,21 +222,32 @@ def main(cfg: Config) -> None:
     os.makedirs(viz_path, exist_ok=True)
 
     plot_solutions(
-        viz_path + timestamp + "_all",
-        # None,
         graphs[0].cpu(),
         paths=[
-            random_paths[0],
+            aco_paths[0],
             hardcoded_paths[0],
             milp_path[0],
         ],
         titles=[
-            random_info,
+            aco_info,
             hardcoded_info,
             milp_info,
         ],
+        out_path=viz_path + timestamp + "_milp",
         rows=3,
         cols=1,
+    )
+
+    plot_heuristics(
+        heuristics=[
+            random_H[0],
+            computed_H[0],
+            path_to_heatmap(milp_path)[0],
+        ],
+        titles=["Random_H", "Computed_H", "MILP_H"],
+        out_path=viz_path + timestamp + "_all_heatmap",
+        rows=1,
+        cols=3,
     )
 
 
