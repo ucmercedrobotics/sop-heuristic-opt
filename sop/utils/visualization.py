@@ -1,3 +1,4 @@
+from typing import Optional
 import matplotlib.pyplot as plt
 import graphviz
 import torch
@@ -11,7 +12,7 @@ from sop.mcts.core import Tree
 
 
 def plot_solutions(
-    out_path: str,
+    out_path: Optional[str],
     graph: TorchGraph,
     paths: list[Path],
     titles: list[str],
@@ -21,7 +22,8 @@ def plot_solutions(
     assert len(paths) == len(titles)
 
     fig, axes = plt.subplots(rows, cols, figsize=(12, 8))
-    axes = axes.flatten()
+    if len(paths) == 1:
+        axes = [axes]
 
     for i, (path, title) in enumerate(zip(paths, titles)):
         ax = axes[i]
@@ -61,7 +63,10 @@ def plot_solutions(
         fig.delaxes(axes[i])  # Removes empty subplot spaces
 
     plt.tight_layout()
-    plt.savefig(out_path + "comp.png")
+    if out_path is not None:
+        plt.savefig(out_path)
+    else:
+        plt.show()
 
 
 def plot_tree(tree: Tree):

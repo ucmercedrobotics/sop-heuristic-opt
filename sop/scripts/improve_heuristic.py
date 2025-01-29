@@ -54,7 +54,7 @@ def evaluate_path(
     indices = torch.arange(batch_size)
 
     budget = graph.extra["budget"].clone()
-    current_budget = budget.unsqueeze(-1).expand((-1, num_samples))
+    total_sampled_cost = torch.zeros((batch_size, num_samples))
 
     path_index = 1
     while path_index < max_length:
@@ -69,11 +69,12 @@ def evaluate_path(
             break
 
         sampled_cost = sample_costs(weight[is_continuing], num_samples, kappa)
-        current_budget[indices] -= sampled_cost
-        # current_budget[indices] -= samples[is_continuing]
+        total_sampled_cost[indices] += sampled_cost
         path_index += 1
 
-    return (current_budget < 0).sum(-1) / num_samples, current_budget.mean(-1)
+    residual_budget = budget - total_sampled_cost
+
+    return (residual_budget < 0).sum(-1) / num_samples, total_sampled_cost.mean(-1)
 
 
 # -- Main Script
@@ -130,6 +131,20 @@ def main(cfg: Config) -> None:
         num_rollouts=cfg.num_samples,
         z=cfg.z,
     )
+    failure_prob, avg_cost = evaluate_path(
+        random_paths[0].unsqueeze(0),
+        graphs[0].unsqueeze(0),
+        cfg.num_samples,
+        cfg.kappa,
+    )
+    random_info = (
+        "Random; "
+        + f"R: {random_paths.reward.sum(-1)[0]:.5f}, "
+        + f"B: {cfg.budget}, "
+        + f"C: {float(avg_cost):.5f}, "
+        + f"F: {float(failure_prob)} "
+    )
+    print(random_info)
 
     print("Generating Hardcoded Paths...")
     hardcoded_paths, is_success = sop_mcts_solver(
@@ -139,40 +154,47 @@ def main(cfg: Config) -> None:
         num_rollouts=cfg.num_samples,
         z=cfg.z,
     )
+    failure_prob, avg_cost = evaluate_path(
+        hardcoded_paths[0].unsqueeze(0),
+        graphs[0].unsqueeze(0),
+        cfg.num_samples,
+        cfg.kappa,
+    )
+    hardcoded_info = (
+        "Hardcoded; "
+        + f"R: {hardcoded_paths.reward.sum(-1)[0]:.5f}, "
+        + f"B: {cfg.budget}, "
+        + f"C: {float(avg_cost):.5f}, "
+        + f"F: {float(failure_prob)} "
+    )
+    print(hardcoded_info)
 
     # -- Test against MILP
-    graph = graphs[0].squeeze().cpu()
-    milp_path = sop_milp_solver(graph, time_limit=60, num_samples=cfg.num_samples)
-
-    # print(
-    #     "hardcoded failure_prob",
-    #     evaluate_path(
-    #         hardcoded_paths[0].unsqueeze(0),
-    #         graphs[0].unsqueeze(0),
-    #         cfg.num_samples,
-    #         cfg.kappa,
-    #     ),
-    # )
-    # print(
-    #     "random failure_prob",
-    #     evaluate_path(
-    #         random_paths[0].unsqueeze(0),
-    #         graphs[0].unsqueeze(0),
-    #         cfg.num_samples,
-    #         cfg.kappa,
-    #     ),
-    # )
-    # print(
-    #     "milp failure_prob",
-    #     evaluate_path(milp_path, graph.unsqueeze(0), cfg.num_samples, cfg.kappa),
-    # )
+    milp_path = sop_milp_solver(
+        graphs[0].cpu(), time_limit=180, num_samples=cfg.num_samples
+    )
+    failure_prob, avg_cost = evaluate_path(
+        milp_path,
+        graphs[0].unsqueeze(0),
+        cfg.num_samples,
+        cfg.kappa,
+    )
+    milp_info = (
+        "MILP; "
+        + f"R: {milp_path.reward.sum(-1)[0]:.5f}, "
+        + f"B: {cfg.budget}, "
+        + f"C: {float(avg_cost):.5f}, "
+        + f"F: {float(failure_prob):.3f} "
+    )
+    print(milp_info)
 
     viz_path: str = cfg.dataset_dir + "/" + cfg.visual_dir + "/"
     print(f"Creating vizualization folder {viz_path}...")
     os.makedirs(viz_path, exist_ok=True)
 
     plot_solutions(
-        viz_path + timestamp + "_",
+        viz_path + timestamp + "_all",
+        # None,
         graphs[0].cpu(),
         paths=[
             random_paths[0],
@@ -180,12 +202,12 @@ def main(cfg: Config) -> None:
             milp_path[0],
         ],
         titles=[
-            f"Random Reward: {random_paths.reward.sum(-1)[0]:.5f}",
-            f"Hardcoded Reward: {hardcoded_paths.reward.sum(-1)[0]:.5f}",
-            f"Milp Reward: {milp_path.reward.sum(-1)[0]:.5f}",
+            random_info,
+            hardcoded_info,
+            milp_info,
         ],
-        rows=1,
-        cols=3,
+        rows=3,
+        cols=1,
     )
 
 

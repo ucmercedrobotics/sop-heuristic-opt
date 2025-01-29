@@ -40,7 +40,7 @@ def sop_mcts_solver(
     path.append(indices, current_node)
 
     while indices.numel() > 0:
-        next_node, score = MCTS_SOPCC(
+        next_node = MCTS_SOPCC(
             graph[indices],
             heuristic[indices],
             current_node[indices],
@@ -50,10 +50,6 @@ def sop_mcts_solver(
             num_rollouts,
             z,
         )
-        is_invalid = score == -torch.inf
-        invalid_i = indices[is_invalid]
-        if invalid_i.numel() > 0:
-            next_node[is_invalid] = goal_node[invalid_i]
 
         # Get values
         r = graph.nodes["reward"][indices, next_node]
@@ -112,7 +108,7 @@ def MCTS_SOPCC(
         backupN(tree, new_tree_node)
         # print(f"BackupN: {time.time() - s}")
 
-    return select_action(tree, current_path)
+    return select_action(tree, graph, current_path)
 
 
 # -- CONSTANTS
@@ -424,7 +420,9 @@ def backupN(tree: Tree, leaf_tree_node: Tensor):
 
 
 # -- Action Selection
-def select_action(tree: Tree, path: Path, p_f: float = 0.1) -> Tuple[Tensor, Tensor]:
+def select_action(
+    tree: Tree, graph: TorchGraph, path: Path, p_f: float = 0.1
+) -> Tuple[Tensor, Tensor]:
     batch_size, _, num_nodes = tree.size()
     indices = torch.arange(batch_size)
 
@@ -438,7 +436,13 @@ def select_action(tree: Tree, path: Path, p_f: float = 0.1) -> Tuple[Tensor, Ten
     action = torch.argmax(masked_scores, axis=-1)
     score = masked_scores[indices, action]
 
-    return action, score
+    # Go to goal if no valid nodes
+    is_invalid = score == -torch.inf
+    invalid_i = indices[is_invalid]
+    if invalid_i.numel() > 0:
+        action[is_invalid] = graph.extra["goal_node"][invalid_i]
+
+    return action
 
 
 # -- ROLLOUT
