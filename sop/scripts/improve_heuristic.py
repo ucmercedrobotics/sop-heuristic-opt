@@ -27,7 +27,7 @@ class Config:
     visual_dir: str = "viz"
     timestamp: str = "2025-01-29_01-11-08"
     # Batch
-    batch_size: int = 8
+    batch_size: int = 1
     device: str = DEVICE
     # Graph
     num_nodes: int = 20
@@ -38,7 +38,7 @@ class Config:
     num_samples: int = 100
     kappa: float = 0.5
     # MCTS
-    num_simulations: int = 100
+    num_simulations: int = 200
     z: float = 0.1
 
 
@@ -142,7 +142,7 @@ def main(cfg: Config) -> None:
 
     # -- Test against MILP
     graph = graphs[0].squeeze().cpu()
-    milp_path = sop_milp_solver(graph, time_limit=60, num_samples=cfg.num_samples)
+    milp_path = sop_milp_solver(graph, time_limit=45, num_samples=cfg.num_samples)
 
     # print(
     #     "hardcoded failure_prob",

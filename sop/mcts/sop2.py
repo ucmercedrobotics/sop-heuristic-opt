@@ -491,8 +491,8 @@ def e_greedy_rollout(
     leaf_graph_node: Tensor,
     budget: Tensor,
     num_rollouts: int,
-    p_r: float = 0.1,
-    p_f: float = 0.1,
+    p_r: float = 0.3,
+    p_f: float = 0.5,
     kappa: float = 0.5,
 ):
     batch_size, num_nodes = graph.size()
@@ -603,7 +603,6 @@ def e_greedy_rollout(
                 sampled_cost = sample_costs(w, num_samples=1, kappa=kappa).squeeze()
                 if sampled_cost.dim() == 0:
                     sampled_cost.unsqueeze_(0)
-                simulated_budgets.index_add_(0, s_suc_indices, -sampled_cost)
                 simulated_budgets.index_add_(0, s_suc_indices, -sampled_cost)
                 # add reward
                 Q.index_add_(0, s_suc_indices, rewards[b_suc_indices, n])
