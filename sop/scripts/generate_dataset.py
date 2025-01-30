@@ -1,3 +1,4 @@
+from typing import Optional
 from dataclasses import dataclass
 from datetime import datetime
 import os
@@ -18,6 +19,7 @@ from sop.utils.sample import sample_costs
 from sop.milp.pulp_milp_sop import sop_milp_solver
 from sop.utils.visualization import plot_solutions
 from sop.utils.path import Path
+from sop.utils.seed import set_seed, random_seed
 
 DEVICE: str = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -27,6 +29,7 @@ DEVICE: str = "cuda" if torch.cuda.is_available() else "cpu"
 class Config:
     # Dataset
     dataset_dir: str = "data"
+    seed: Optional[int] = None
     # Batch
     batch_size: int = 8
     device: str = DEVICE
@@ -58,6 +61,11 @@ def main(cfg: Config) -> None:
     print(f"Creating data folder {cfg.dataset_dir}...")
     os.makedirs(cfg.dataset_dir, exist_ok=True)
 
+    # -- Set seed
+    if cfg.seed is None:
+        cfg.seed = random_seed()
+    set_seed(cfg.seed)
+
     # -- Generate Data
     print("Generating graphs...")
     graphs: TorchGraph = generate_sop_graphs(
@@ -69,14 +77,12 @@ def main(cfg: Config) -> None:
         cfg.num_samples,
         cfg.kappa,
     )
-    # get time for stamping graph export file
-    current_datetime: str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     # NOTE: current format of graph dataset path is <time>_dataset_<batch_size>_<graph_size>
     # TODO: if we begin to have multiple experiments of the same time, we can add more flags to the path
     graph_path: str = (
         cfg.dataset_dir
         + "/"
-        + current_datetime
+        + str(cfg.seed)
         + "_"
         + "graphs"
         + "_"

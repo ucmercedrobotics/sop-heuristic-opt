@@ -1,3 +1,4 @@
+from typing import Optional
 from dataclasses import dataclass
 import os
 from datetime import datetime
@@ -20,6 +21,7 @@ from sop.mcts.sop2 import (
 from sop.milp.pulp_milp_sop import sop_milp_solver
 from sop.utils.visualization import plot_solutions, plot_heuristics
 from sop.utils.path import Path
+from sop.utils.seed import set_seed, random_seed
 
 DEVICE: str = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -30,7 +32,7 @@ class Config:
     # Data
     dataset_dir: str = "data"
     visual_dir: str = "viz"
-    timestamp: str = "2025-01-29_01-11-08"
+    seed: Optional[int] = None
     # Batch
     batch_size: int = 8
     device: str = DEVICE
@@ -44,7 +46,8 @@ class Config:
     kappa: float = 0.5
     # MCTS
     num_simulations: int = 100
-    z: float = 0.5
+    z: float = 0.15
+    init_lr: float = 1.5
 
 
 cs = ConfigStore.instance()
@@ -110,13 +113,18 @@ def path_to_heatmap(path: Path) -> torch.Tensor:
 def main(cfg: Config) -> None:
     torch.set_default_device(cfg.device)
 
+    # -- Set seed
+    if cfg.seed is None:
+        cfg.seed = random_seed()
+    set_seed(cfg.seed)
+
     # -- Generate Data
     # TODO: if file exists, import
     # TODO: if we begin to have multiple experiments of the same time, we can add more flags to the path
-    expected_graph_tensor_path: str = (
+    expected_graph_tensor_path = (
         cfg.dataset_dir
         + "/"
-        + cfg.timestamp
+        + str(cfg.seed)
         + "_graphs_"
         + str(cfg.batch_size)
         + "_"
@@ -124,11 +132,10 @@ def main(cfg: Config) -> None:
     )
     if os.path.isfile(expected_graph_tensor_path):
         print(f"Loading graphs from {expected_graph_tensor_path}...")
-        graphs: TorchGraph = TorchGraph.load(expected_graph_tensor_path)
-        timestamp: str = cfg.timestamp
+        graphs = TorchGraph.load(expected_graph_tensor_path)
     else:
         print(f"Generating {cfg.batch_size} graphs...")
-        graphs: TorchGraph = generate_sop_graphs(
+        graphs = generate_sop_graphs(
             cfg.batch_size,
             cfg.num_nodes,
             cfg.start_node,
@@ -137,7 +144,6 @@ def main(cfg: Config) -> None:
             cfg.num_samples,
             cfg.kappa,
         )
-        timestamp: str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
     # -- Heuristic Creation
     # -- TODO: GNN heuristic
@@ -152,12 +158,13 @@ def main(cfg: Config) -> None:
     # -- TODO: Gumbel Muzero
     # -- TODO: Thompson Sampling
     print("Generating MCTS+ACO Paths...")
-    aco_paths, is_success, current_budget = sop_mcts_solver(
+    aco_paths, is_success, new_H = sop_mcts_aco_solver(
         graph=graphs,
         heuristic=random_H,
         num_simulations=cfg.num_simulations,
         num_rollouts=cfg.num_samples,
         z=cfg.z,
+        init_lr=cfg.init_lr,
     )
     failure_prob, avg_cost = evaluate_path(
         aco_paths[0].unsqueeze(0),
@@ -170,82 +177,86 @@ def main(cfg: Config) -> None:
         + f"R: {aco_paths.reward.sum(-1)[0]:.5f}, "
         + f"B: {cfg.budget}, "
         + f"C: {float(avg_cost):.5f}, "
-        + f"F: {float(failure_prob)} "
+        + f"F: {float(failure_prob):.3f} "
         + f"N: {int(aco_paths.length[0])}"
     )
     print(aco_info)
+    new_H = random_H
 
-    print("Generating Hardcoded Paths...")
-    hardcoded_paths, is_success = sop_mcts_solver(
-        graph=graphs,
-        heuristic=computed_H,
-        num_simulations=cfg.num_simulations,
-        num_rollouts=cfg.num_samples,
-        z=cfg.z,
-    )
-    failure_prob, avg_cost = evaluate_path(
-        hardcoded_paths[0].unsqueeze(0),
-        graphs[0].unsqueeze(0),
-        cfg.num_samples,
-        cfg.kappa,
-    )
-    hardcoded_info = (
-        "Hardcoded; "
-        + f"R: {hardcoded_paths.reward.sum(-1)[0]:.5f}, "
-        + f"B: {cfg.budget}, "
-        + f"C: {float(avg_cost):.5f}, "
-        + f"F: {float(failure_prob)} "
-    )
-    print(hardcoded_info)
+    # print("Generating Hardcoded Paths...")
+    # hardcoded_paths, is_success = sop_mcts_solver(
+    #     graph=graphs,
+    #     heuristic=computed_H,
+    #     num_simulations=cfg.num_simulations,
+    #     num_rollouts=cfg.num_samples,
+    #     z=cfg.z,
+    # )
+    # failure_prob, avg_cost = evaluate_path(
+    #     hardcoded_paths[0].unsqueeze(0),
+    #     graphs[0].unsqueeze(0),
+    #     cfg.num_samples,
+    #     cfg.kappa,
+    # )
+    # hardcoded_info = (
+    #     "Hardcoded; "
+    #     + f"R: {hardcoded_paths.reward.sum(-1)[0]:.5f}, "
+    #     + f"B: {cfg.budget}, "
+    #     + f"C: {float(avg_cost):.5f}, "
+    #     + f"F: {float(failure_prob):.3f} "
+    #     + f"N: {int(hardcoded_paths.length[0])}"
+    # )
+    # print(hardcoded_info)
 
     # -- Test against MILP
-    milp_path = sop_milp_solver(
-        graphs[0].cpu(), time_limit=180, num_samples=cfg.num_samples
-    )
-    failure_prob, avg_cost = evaluate_path(
-        milp_path,
-        graphs[0].unsqueeze(0),
-        cfg.num_samples,
-        cfg.kappa,
-    )
-    milp_info = (
-        "MILP; "
-        + f"R: {milp_path.reward.sum(-1)[0]:.5f}, "
-        + f"B: {cfg.budget}, "
-        + f"C: {float(avg_cost):.5f}, "
-        + f"F: {float(failure_prob):.3f} "
-    )
-    print(milp_info)
+    # milp_path = sop_milp_solver(
+    #     graphs[0].cpu(), time_limit=180, num_samples=cfg.num_samples
+    # )
+    # failure_prob, avg_cost = evaluate_path(
+    #     milp_path,
+    #     graphs[0].unsqueeze(0),
+    #     cfg.num_samples,
+    #     cfg.kappa,
+    # )
+    # milp_info = (
+    #     "MILP; "
+    #     + f"R: {milp_path.reward.sum(-1)[0]:.5f}, "
+    #     + f"B: {cfg.budget}, "
+    #     + f"C: {float(avg_cost):.5f}, "
+    #     + f"F: {float(failure_prob):.3f} "
+    #     + f"N: {int(milp_path.length[0])}"
+    # )
+    # print(milp_info)
 
-    viz_path: str = cfg.dataset_dir + "/" + cfg.visual_dir + "/"
+    viz_path = cfg.dataset_dir + "/" + cfg.visual_dir
     print(f"Creating vizualization folder {viz_path}...")
     os.makedirs(viz_path, exist_ok=True)
+    viz_prefix = f"{viz_path}/{cfg.seed}_{cfg.batch_size}_{cfg.num_nodes}"
 
     plot_solutions(
         graphs[0].cpu(),
         paths=[
             aco_paths[0],
-            hardcoded_paths[0],
-            milp_path[0],
+            # hardcoded_paths[0],
+            # milp_path[0],
         ],
         titles=[
             aco_info,
-            hardcoded_info,
-            milp_info,
+            # hardcoded_info,
+            # milp_info,
         ],
-        out_path=viz_path + timestamp + "_milp",
-        rows=3,
+        out_path=viz_prefix + "_aco",
+        rows=1,
         cols=1,
     )
 
     plot_heuristics(
         heuristics=[
             random_H[0],
-            computed_H[0],
-            path_to_heatmap(milp_path)[0],
+            new_H[0],
+            path_to_heatmap(aco_paths)[0],
         ],
-        titles=["Random_H", "Computed_H", "MILP_H"],
-        out_path=viz_path + timestamp + "_all_heatmap",
+        titles=["Random_H", "New_H", "Path_H"],
+        out_path=viz_prefix + "_aco_heatmap",
         rows=1,
         cols=3,
     )

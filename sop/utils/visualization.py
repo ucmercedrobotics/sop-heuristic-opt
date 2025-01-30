@@ -70,37 +70,26 @@ def plot_solutions(
         plt.show()
 
 
-def heatmap(data, ax=None, cbar_kw=None, cbarlabel="", **kwargs):
+def heatmap(data, ax, xstep=5, ystep=1, **kwargs):
     """
-    Create a heatmap from a numpy array and two lists of labels.
+    Create a heatmap from a 2x2 matrix.
     Taken from: https://matplotlib.org/stable/gallery/images_contours_and_fields/image_annotated_heatmap.html
     """
-
-    if ax is None:
-        ax = plt.gca()
-
-    if cbar_kw is None:
-        cbar_kw = {}
-
     # Plot the heatmap
     im = ax.imshow(data, **kwargs)
-
-    # Create colorbar
-    cbar = ax.figure.colorbar(im, ax=ax, **cbar_kw)
-    cbar.ax.set_ylabel(cbarlabel, rotation=-90, va="bottom")
-
-    # Let the horizontal axes labeling appear on top.
-    ax.tick_params(top=True, bottom=False, labeltop=True, labelbottom=False)
 
     # Turn spines off and create white grid.
     ax.spines[:].set_visible(False)
 
-    ax.set_xticks(np.arange(data.shape[1] + 1) - 0.5, minor=True)
-    ax.set_yticks(np.arange(data.shape[0] + 1) - 0.5, minor=True)
-    ax.grid(which="minor", color="w", linestyle="-", linewidth=3)
-    ax.tick_params(which="minor", bottom=False, left=False)
+    # Show all ticks and label them with the respective list entries
+    x_labels = [i for i in range(0, data.shape[1], xstep)]
+    y_labels = [i for i in range(0, data.shape[0], ystep)]
 
-    return im, cbar
+    ax.set_xticks(range(0, data.shape[1], 5), labels=x_labels)
+    ax.set_yticks(range(data.shape[0]), labels=y_labels)
+    ax.grid(which="minor", color="w", linestyle="-", linewidth=3)
+
+    return im
 
 
 def plot_heuristics(
@@ -118,8 +107,7 @@ def plot_heuristics(
 
     for i, (H, title) in enumerate(zip(heuristics, titles)):
         ax = axes[i]
-        im, cbar = heatmap(H, ax=ax, cmap="YlGn", cbarlabel="Score")
-
+        im = heatmap(H, ax=ax, cmap="YlGn")
         ax.set_title(title)
 
     # Hide unused subplots
