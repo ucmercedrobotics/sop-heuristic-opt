@@ -27,6 +27,9 @@ def sop_mcts_solver(
     num_simulations: int,
     num_rollouts: int,
     z: float,
+    p_f: float,
+    epsilon: float,
+    kappa: float,
 ) -> Tuple[Path, Tensor]:
     batch_size, num_nodes = graph.size()
 
@@ -49,6 +52,9 @@ def sop_mcts_solver(
             num_simulations,
             num_rollouts,
             z,
+            p_f,
+            epsilon,
+            kappa,
         )
 
         # Get values
@@ -83,6 +89,9 @@ def MCTS_SOPCC(
     num_simulations: int,
     num_rollouts: int,
     z: float,
+    p_f: float,
+    epsilon: float,
+    kappa: float,
 ) -> Tuple[Tensor, Tensor]:
     tree = Tree.instantiate_from_root(current_node, graph, num_simulations)
     for k in range(num_simulations):
@@ -93,7 +102,15 @@ def MCTS_SOPCC(
         # print(f"Select: {time.time() - s}")
         # s = time.time()
         Q, F = e_greedy_rollout(
-            graph, heuristic, tree_path, new_graph_node, current_budget, num_rollouts
+            graph,
+            heuristic,
+            tree_path,
+            new_graph_node,
+            current_budget,
+            num_rollouts,
+            p_f,
+            epsilon,
+            kappa,
         )
         # print(f"Rollout: {time.time() - s}")
         # s = time.time()
@@ -102,13 +119,13 @@ def MCTS_SOPCC(
         )
         # print(f"Expand: {time.time() - s}")
         # s = time.time()
-        backup(tree, graph, new_tree_node)
+        backup(tree, graph, new_tree_node, p_f)
         # print(f"Backup: {time.time() - s}")
         # s = time.time()
         backupN(tree, new_tree_node)
         # print(f"BackupN: {time.time() - s}")
 
-    return select_action(tree, graph, current_path)
+    return select_action(tree, graph, current_path, p_f)
 
 
 def sop_mcts_aco_solver(
@@ -119,6 +136,7 @@ def sop_mcts_aco_solver(
     z: float,
     p_f: float,
     epsilon: float,
+    kappa: float,
 ) -> Tuple[Path, Tensor]:
     batch_size, num_nodes = graph.size()
 
@@ -147,6 +165,7 @@ def sop_mcts_aco_solver(
             z=z,
             p_f=p_f,
             epsilon=epsilon,
+            kappa=kappa,
         )
 
         # Get values
@@ -183,30 +202,48 @@ def MCTS_ACO(
     z: float,
     epsilon: float,
     p_f: float,
+    kappa: float,
 ) -> Tuple[Tensor, Tensor]:
     tree = Tree.instantiate_from_root(current_node, graph, num_simulations)
 
     # TODO Rollout and Update Heuristic on Root node
-    Q, F, rollout_paths = e_greedy_rollout(
-        graph,
-        heuristic,
-        current_path,
-        current_node,
-        current_budget,
-        num_rollouts,
-        p_f=p_f,
-        epsilon=epsilon,
-    )
-    # heuristic = update_heuristic(heuristic, tree, graph, rollout_paths)
+    # rollout_paths, rollout_residual = e_greedy_rollout(
+    #     graph,
+    #     heuristic,
+    #     current_path,
+    #     current_node,
+    #     current_budget,
+    #     num_rollouts,
+    #     p_f=p_f,
+    #     epsilon=epsilon,
+    #     kappa=kappa,
+    # )
+    # Q, F, heuristic = backup_paths(
+    #     heuristic, tree, graph, rollout_paths, rollout_residual
+    # )
+    # assert False
 
     for k in range(num_simulations - 1):
         # -- Select a node to rollout
         parent_tree_node, new_graph_node, tree_path, is_expanded, is_finished = select(
-            tree, graph, heuristic, current_path, z=z, score_fn=compute_puctf
+            tree, graph, heuristic, current_path, z=z, score_fn=compute_uctf
         )
 
         # -- Rollout
-        Q, F, rollout_paths = e_greedy_rollout(
+        # rollout_paths, rollout_residual = e_greedy_rollout(
+        #     graph,
+        #     heuristic,
+        #     tree_path,
+        #     new_graph_node,
+        #     current_budget,
+        #     num_rollouts,
+        #     p_f=p_f,
+        #     epsilon=epsilon,
+        # )
+        # Q, F, heuristic = backup_paths(
+        #     heuristic, tree, graph, rollout_paths, rollout_residual
+        # )
+        Q, F = e_greedy_rollout(
             graph,
             heuristic,
             tree_path,
@@ -215,8 +252,8 @@ def MCTS_ACO(
             num_rollouts,
             p_f=p_f,
             epsilon=epsilon,
+            kappa=kappa,
         )
-        # heuristic = update_heuristic(heuristic, tree, graph, rollout_paths)
 
         # -- Expand Node
         new_tree_node = expand(
@@ -658,7 +695,7 @@ def e_greedy_rollout(
     sim_indices = torch.arange(batch_size * num_rollouts)  # [B*S]
 
     # Create Paths
-    sim_paths = tree_path.clone().unsqueeze(-1).expand(sim_shape).flatten()
+    sim_paths = tree_path.unsqueeze(-1).expand(sim_shape).flatten().clone()
 
     # Local Failure mask
     failure_mask = torch.zeros((batch_size * num_rollouts, num_nodes))
@@ -676,7 +713,7 @@ def e_greedy_rollout(
 
     # Loop State
     current_nodes = (
-        leaf_graph_node.clone().unsqueeze(-1).broadcast_to(sim_shape).flatten()
+        leaf_graph_node.unsqueeze(-1).broadcast_to(sim_shape).flatten().clone()
     )  # [B*S]
 
     while sim_indices.numel() > 0:
@@ -684,30 +721,31 @@ def e_greedy_rollout(
         new_nodes = torch.empty(flatten_shape, dtype=torch.long)
 
         # 1. Action selection
+        # 1a. Compute valid node mask
         mask = torch.logical_or(sim_paths.mask[sim_indices], failure_mask[sim_indices])
-
-        # 1a. If mask has no valid nodes, go to goal
         is_invalid = mask.sum(-1) == num_nodes
+        is_valid = ~is_invalid
+
+        # 1b. If mask has no valid nodes, go to goal
         b_invalid_i, s_invalid_i = batch_indices[is_invalid], sim_indices[is_invalid]
         if s_invalid_i.numel() > 0:
-            new_nodes[s_invalid_i] = goal_node[b_invalid_i]
+            new_nodes[s_invalid_i] = goal_node[b_invalid_i].clone()
 
-        # 1b. sample random p
-        is_valid = ~is_invalid
+        # 1c. sample random p
         b_valid_i, s_valid_i = batch_indices[is_valid], sim_indices[is_valid]
+        mask = mask[is_valid]
         p = torch.rand(s_valid_i.shape)
         choose_random = p < epsilon
         choose_greedy = ~choose_random
-        mask = mask[is_valid]
 
-        # 1c: if p < p_r, select random
+        # 1d: if p < p_r, select random
         s_rand_i = s_valid_i[choose_random]
         if s_rand_i.numel() > 0:
             m = ~mask[choose_random]
             action = torch.multinomial(m.float(), num_samples=1).squeeze()
             new_nodes[s_rand_i] = action
 
-        # 1d: else p >= p_r select greedy
+        # 1e: else p >= p_r select greedy
         b_greedy_i, s_greedy_i = (
             b_valid_i[choose_greedy],
             s_valid_i[choose_greedy],
@@ -720,8 +758,8 @@ def e_greedy_rollout(
             new_nodes[s_greedy_i] = action
 
         # 2. Determine if action is goal
-        is_cont = new_nodes[sim_indices] != goal_node[batch_indices]
-        b_cont_i, s_cont_i = batch_indices[is_cont], sim_indices[is_cont]
+        # is_cont = new_nodes[s_valid_i] != goal_node[b_valid_i]
+        b_cont_i, s_cont_i = b_valid_i, s_valid_i
 
         # 3. If not goal, compute failure probability
         if s_cont_i.numel() > 0:
@@ -764,8 +802,9 @@ def e_greedy_rollout(
                 failure_mask[s_fail_i, n] = 1
 
         # 4: else is goal, add to path and return
-        is_goal = ~is_cont
-        b_goal_i, s_goal_i = batch_indices[is_goal], sim_indices[is_goal]
+        # is_goal = ~is_cont
+        # b_goal_i, s_goal_i = batch_indices[is_goal], sim_indices[is_goal]
+        b_goal_i, s_goal_i = b_invalid_i, s_invalid_i
         if s_goal_i.numel() > 0:
             c = current_nodes[s_goal_i]
             n = new_nodes[s_goal_i]
@@ -780,15 +819,13 @@ def e_greedy_rollout(
             sim_paths.append(s_goal_i, n, r)
 
         # 5. Update Loop State
-        batch_indices, sim_indices = batch_indices[is_cont], sim_indices[is_cont]
+        batch_indices, sim_indices = b_valid_i, s_valid_i
 
     sim_paths = sim_paths.reshape(sim_shape)
+    sim_residual = simulated_budgets.reshape(sim_shape)
+
     Q = sim_paths.reward.sum(-1).sum(-1) / num_rollouts
-    F = (simulated_budgets.reshape(sim_shape) < 0).sum(-1) / num_rollouts
+    F = (sim_residual < 0).sum(-1) / num_rollouts
 
-    return Q, F, sim_paths
-
-
-def update_heuristic(
-    heuristic: Tensor, tree: Tree, graph: TorchGraph, rollout_paths: Path
-): ...
+    # return sim_paths, sim_residual
+    return Q, F

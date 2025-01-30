@@ -157,7 +157,7 @@ def main(cfg: Config) -> None:
     # -- TODO: pUCT
     # -- TODO: Gumbel Muzero
     # -- TODO: Thompson Sampling
-    # print("Generating MCTS+ACO Paths...")
+    print("Generating MCTS+ACO Paths...")
     aco_paths, is_success, new_H = sop_mcts_aco_solver(
         graph=graphs,
         heuristic=computed_H,
@@ -166,6 +166,7 @@ def main(cfg: Config) -> None:
         z=cfg.z,
         p_f=cfg.p_f,
         epsilon=cfg.epsilon,
+        kappa=cfg.kappa,
     )
     failure_prob, avg_cost = evaluate_path(
         aco_paths[0].unsqueeze(0),
