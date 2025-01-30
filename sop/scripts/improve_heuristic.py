@@ -47,7 +47,8 @@ class Config:
     # MCTS
     num_simulations: int = 100
     z: float = 0.15
-    init_lr: float = 1.5
+    epsilon: float = 0.1
+    p_f: float = 0.1
 
 
 cs = ConfigStore.instance()
@@ -116,7 +117,6 @@ def main(cfg: Config) -> None:
     # -- Set seed
     if cfg.seed is None:
         cfg.seed = random_seed()
-    set_seed(cfg.seed)
 
     # -- Generate Data
     # TODO: if file exists, import
@@ -157,14 +157,15 @@ def main(cfg: Config) -> None:
     # -- TODO: pUCT
     # -- TODO: Gumbel Muzero
     # -- TODO: Thompson Sampling
-    print("Generating MCTS+ACO Paths...")
+    # print("Generating MCTS+ACO Paths...")
     aco_paths, is_success, new_H = sop_mcts_aco_solver(
         graph=graphs,
-        heuristic=random_H,
+        heuristic=computed_H,
         num_simulations=cfg.num_simulations,
         num_rollouts=cfg.num_samples,
         z=cfg.z,
-        init_lr=cfg.init_lr,
+        p_f=cfg.p_f,
+        epsilon=cfg.epsilon,
     )
     failure_prob, avg_cost = evaluate_path(
         aco_paths[0].unsqueeze(0),
@@ -181,7 +182,7 @@ def main(cfg: Config) -> None:
         + f"N: {int(aco_paths.length[0])}"
     )
     print(aco_info)
-    new_H = random_H
+    # new_H = random_H
 
     # print("Generating Hardcoded Paths...")
     # hardcoded_paths, is_success = sop_mcts_solver(
@@ -254,6 +255,7 @@ def main(cfg: Config) -> None:
             random_H[0],
             new_H[0],
             path_to_heatmap(aco_paths)[0],
+            # path_to_heatmap(milp_path)[0],
         ],
         titles=["Random_H", "New_H", "Path_H"],
         out_path=viz_prefix + "_aco_heatmap",
