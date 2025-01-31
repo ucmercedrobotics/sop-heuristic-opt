@@ -42,6 +42,13 @@ def plot_solutions(
         alpha[goal_node] = 0.5
 
         ax.scatter(x=pos[:, 0], y=pos[:, 1], c=colors, alpha=alpha)
+        # Label each point
+        for i in range(len(pos)):
+            ax.annotate(
+                i, pos[i], textcoords="offset points", xytext=(5, 5), ha="right"
+            )
+
+        # -- Label
 
         # -- Draw edges
         path_index = 1
@@ -70,13 +77,20 @@ def plot_solutions(
         plt.show()
 
 
-def heatmap(data, ax, xstep=5, ystep=1, **kwargs):
+def heatmap(data, ax, cbar_kw=None, cbarlabel="", xstep=5, ystep=1, **kwargs):
     """
     Create a heatmap from a 2x2 matrix.
     Taken from: https://matplotlib.org/stable/gallery/images_contours_and_fields/image_annotated_heatmap.html
     """
+    if cbar_kw is None:
+        cbar_kw = {}
+
     # Plot the heatmap
     im = ax.imshow(data, **kwargs)
+
+    # Create colorbar
+    cbar = ax.figure.colorbar(im, ax=ax, **cbar_kw)
+    cbar.ax.set_ylabel(cbarlabel, rotation=-90, va="bottom")
 
     # Turn spines off and create white grid.
     ax.spines[:].set_visible(False)
@@ -107,7 +121,7 @@ def plot_heuristics(
 
     for i, (H, title) in enumerate(zip(heuristics, titles)):
         ax = axes[i]
-        im = heatmap(H, ax=ax, cmap="YlGn")
+        im = heatmap(H, ax=ax, cmap="YlGn", cbarlabel="score")
         ax.set_title(title)
 
     # Hide unused subplots
