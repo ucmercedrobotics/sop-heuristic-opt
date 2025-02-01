@@ -86,7 +86,7 @@ def evaluate_path(
         total_sampled_cost[indices] += sampled_cost
         path_index += 1
 
-    residual_budget = budget - total_sampled_cost
+    residual_budget = budget.unsqueeze(-1) - total_sampled_cost
 
     return (residual_budget < 0).sum(-1) / num_samples, total_sampled_cost.mean(-1)
 

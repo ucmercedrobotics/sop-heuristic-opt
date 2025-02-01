@@ -23,6 +23,10 @@ def random_heuristic(batch_size: int, num_nodes: int):
     return torch.rand((batch_size, num_nodes, num_nodes)).softmax(-1)
 
 
+def small_heuristic(batch_size: int, num_nodes: int):
+    return torch.ones((batch_size, num_nodes, num_nodes)).softmax(-1)
+
+
 def mcts_sopcc_heuristic(rewards: Tensor, sampled_costs: Tensor):
     average_cost = sampled_costs.mean(dim=-1)
     return rewards.unsqueeze(-1) / average_cost
@@ -43,8 +47,9 @@ class ACOParams:
     beta: float = 1.0
     rho: float = 0.1
     lr: float = 1.0
-    fail_penalty: float = 0.9
-    a: float = 10
+    fail_penalty: float = 1.0
+    a: float = 5
+    topk: int = 10
 
 
 @torch.no_grad
@@ -53,6 +58,7 @@ def sop_aco_solver(
     graph: TorchGraph,
     heuristic: Tensor,
     num_rollouts: int,
+    num_iterations: int,
     p_f: float,
     kappa: float,
 ) -> Tuple[Path, Tensor]:
@@ -80,16 +86,16 @@ def sop_aco_solver(
     while indices.numel() > 0:
         next_node = aco_search(
             params=params,
-            graph=graph[indices],
             state=state[indices],
+            graph=graph[indices],
             current_node=current_node[indices],
             current_budget=current_budget[indices],
             current_path=path[indices],
             num_rollouts=num_rollouts,
+            num_iterations=num_iterations,
             p_f=p_f,
             kappa=kappa,
         )
-        return next_node
 
         # Get values
         r = rewards[indices, next_node]
@@ -97,7 +103,7 @@ def sop_aco_solver(
 
         # Update budget
         sampled_cost = sample_costs(w, num_samples=1, kappa=kappa)
-        current_budget[indices] -= sampled_cost
+        current_budget[indices] -= sampled_cost.squeeze(-1)
 
         # Add to path
         path.append(indices, next_node, r)
@@ -125,13 +131,14 @@ class MMACSState:
     tau_min: Tensor
     tau_max: Tensor
     best_score: Tensor
+    best_path: Tensor
 
     @classmethod
     def init(
         cls,
         heuristic: Tensor,
     ):
-        batch_size = heuristic.shape[0]
+        batch_size, num_nodes, _ = heuristic.shape
 
         def init_param(value: float):
             return torch.full((batch_size,), value, dtype=torch.float32)
@@ -142,41 +149,32 @@ class MMACSState:
             tau_min=init_param(0),
             tau_max=init_param(1),
             best_score=init_param(-torch.inf),
+            best_path=torch.zeros((batch_size, num_nodes + 1), dtype=torch.long),
             batch_size=[batch_size],
         )
-
-    def update_max_min(self, iteration_best_score: Tensor, params: ACOParams):
-        indices = torch.arange(iteration_best_score.shape[0])
-
-        is_better = iteration_best_score > self.best_score
-        better_i = indices[is_better]
-        if better_i.numel() == 0:
-            return
-
-        self.best_score[better_i] = iteration_best_score[better_i]
-        self.tau_max[better_i] = params.rho * self.best_score[better_i]
-        self.tau_min[better_i] = self.tau_max[better_i] / params.a
 
 
 def aco_search(
     params: ACOParams,
-    graph: TorchGraph,
     state: MMACSState,
+    graph: TorchGraph,
     current_node: Tensor,
     current_budget: Tensor,
     current_path: Path,
     num_rollouts: int,
+    num_iterations: int,
     p_f: float,
     kappa: float,
 ) -> Tuple[Tensor]:
-    # old_pheremone = state.pheremone
+    def scoring_fn(params, graph, output):
+        return fail_prob_scoring_fn(params, graph, output, p_f)
 
-    for i in range(10):
-        # TODO: There is a looping bug somewhere..
+    for k in range(num_iterations):
+        # TODO: There is a looping bug somewhere.. appears sometimes...
         output = aco_rollout(
             params,
-            graph,
             state,
+            graph,
             current_path,
             current_node,
             current_budget,
@@ -185,36 +183,30 @@ def aco_search(
             kappa,
             action_selection_fn=ada_ir_action_selection,
         )
-        bounded_topk_update(params, output, state, k=None)
-        evaluate_ranking(graph, output, num_rollouts, kappa, visualize=False)
+        score = bounded_topk_update(
+            params, state, graph, output, k=None, scoring_fn=scoring_fn
+        )
 
-    # new_pheremone = state.pheremone
+    return select_action(state)
 
-    # evaluate_ranking(graph, output, num_rollouts, kappa)
 
-    # plot_heuristics(
-    #     heuristics=[old_pheremone[0], new_pheremone[0]],
-    #     titles=["old", "new"],
-    #     rows=1,
-    #     cols=2,
-    # )
-
-    # assert False
-
-    Q = output.path.reward.sum(-1).sum(-1) / num_rollouts
-    return Q
+def select_action(state: MMACSState):
+    indices = torch.arange(state.shape[0])
+    next_node = state.best_path[indices, 1]
+    state.best_score = torch.full_like(state.best_score, -torch.inf)
+    return next_node
 
 
 # -- Rollout action selection
 def aco_action_selection(
-    pheremone: Tensor, heuristic: Tensor, mask: Tensor, params: ACOParams
+    params: ACOParams, pheremone: Tensor, heuristic: Tensor, mask: Tensor
 ):
     score = (pheremone**params.alpha) * (heuristic**params.beta)
     return torch.multinomial(torch.masked_fill(score, mask, 0), num_samples=1).squeeze()
 
 
 def ir_action_selection(
-    pheremone: Tensor, heuristic: Tensor, mask: Tensor, params: ACOParams
+    params: ACOParams, pheremone: Tensor, heuristic: Tensor, mask: Tensor
 ):
     score = (pheremone**params.alpha) * (heuristic**params.beta)
     r = torch.rand_like(score)
@@ -222,11 +214,13 @@ def ir_action_selection(
 
 
 def ada_ir_action_selection(
-    pheremone: Tensor, heuristic: Tensor, mask: Tensor, params: ACOParams
+    params: ACOParams, pheremone: Tensor, heuristic: Tensor, mask: Tensor
 ):
     score = (pheremone**params.alpha) * (heuristic**params.beta)
     r = torch.rand_like(score) ** params.lr
-    return torch.argmax(torch.masked_fill(score * r, mask, 0), dim=-1).squeeze()
+    sr = score * r
+    action = torch.argmax(torch.masked_fill(sr, mask, 0), dim=-1).squeeze()
+    return action
 
 
 # -- Rollout
@@ -239,8 +233,8 @@ class RolloutOutput:
 
 def aco_rollout(
     params: ACOParams,
-    graph: TorchGraph,
     state: MMACSState,
+    graph: TorchGraph,
     current_path: Tensor,
     starting_node: Tensor,
     budget: Tensor,
@@ -273,10 +267,12 @@ def aco_rollout(
     failure_mask = torch.zeros((batch_size * num_rollouts, num_nodes))
 
     # Sample traverse cost
-    ts = sample_traverse_cost(current_path, graph, num_rollouts, kappa)
-    sampled_budgets = budget.unsqueeze(-1) - ts  # [B, S]
-    simulated_budgets = sampled_budgets.flatten()
-    starting_budgets = simulated_budgets.clone()
+    # ts = sample_traverse_cost(current_path, graph, num_rollouts, kappa)
+    # sampled_budgets = budget.unsqueeze(-1) - ts  # [B, S]
+    # starting_budgets = sampled_budgets.flatten().clone()
+    # No need to sample budgets...
+    starting_budgets = budget.unsqueeze(-1).expand(-1, num_rollouts).flatten().clone()
+    simulated_budgets = starting_budgets.clone()
 
     # Loop State
     current_nodes = (
@@ -313,7 +309,7 @@ def aco_rollout(
         c = current_nodes[s_valid_i]
         p = state.pheremone[b_valid_i, c]
         h = state.heuristic[b_valid_i, c]
-        new_nodes[s_valid_i] = action_selection_fn(p, h, mask, params)
+        new_nodes[s_valid_i] = action_selection_fn(params, p, h, mask)
 
         # 2. Determine if action is goal
         b_cont_i, s_cont_i = b_valid_i, s_valid_i
@@ -425,17 +421,37 @@ def compute_failure_prob(sample_c_n: Tensor, sample_n_g: Tensor, B: Tensor) -> T
 
 
 # -- Path scoring methods
-def penalty_scoring_fn(output: RolloutOutput, params: ACOParams):
+def penalty_scoring_fn(params: ACOParams, graph: TorchGraph, output: RolloutOutput):
     R = output.path.reward.sum(-1)
     F = (output.residual < 0).float()
     return R * (1 - params.fail_penalty * F)
 
 
-def penalty_cost_scoring_fn(output: RolloutOutput, params: ACOParams):
+def penalty_cost_scoring_fn(
+    params: ACOParams, graph: TorchGraph, output: RolloutOutput
+):
     R = output.path.reward.sum(-1)
     F = (output.residual < 0).float()
     L = output.cost
     return (R / L) * (1 - params.fail_penalty * F)
+
+
+def fail_prob_scoring_fn(
+    params: ACOParams, graph: TorchGraph, output: RolloutOutput, p_f: float
+):
+    R = output.path.reward.sum(-1)
+    avg_cost, failure_prob = evaluate_rollouts(graph, output)
+    F = failure_prob > p_f
+    return R * (1 - params.fail_penalty * F) + 1e-9
+
+
+def fail_prob_avg_cost_scoring_fn(
+    params: ACOParams, graph: TorchGraph, output: RolloutOutput, p_f: float
+):
+    R = output.path.reward.sum(-1)
+    avg_cost, failure_prob = evaluate_rollouts(graph, output)
+    F = failure_prob > p_f
+    return (R / avg_cost) * (1 - params.fail_penalty * F)
 
 
 # -- Update Pheremone
@@ -448,8 +464,9 @@ def penalty_cost_scoring_fn(output: RolloutOutput, params: ACOParams):
 # 2. a: scaling factor
 def bounded_topk_update(
     params: ACOParams,
-    output: RolloutOutput,
     state: MMACSState,
+    graph: TorchGraph,
+    output: RolloutOutput,
     k: Optional[int] = None,
     scoring_fn: Callable = penalty_scoring_fn,
 ):
@@ -468,7 +485,7 @@ def bounded_topk_update(
     weights = weights.unsqueeze(0).expand((batch_size, -1))
 
     # Score and sort outputs
-    score = scoring_fn(output, params)
+    score = scoring_fn(params, graph, output)
     sorted_i = torch.argsort(score, descending=True, dim=-1)
     sorted_output = output[b_indices, sorted_i]
     sorted_weights = weights[b_indices, sorted_i]
@@ -478,14 +495,15 @@ def bounded_topk_update(
     weighted_score = sorted_weights * sorted_score
 
     # Compute update pheremone matrix
-    update_matrix = compute_update(sorted_output, state, weighted_score)
+    update_matrix = compute_update(state, sorted_output, weighted_score)
 
     # Compute pheremone
     new_pheremone = (1 - params.rho) * state.pheremone + params.rho * update_matrix
 
     # Update tau_min and tau_max
     best_score = weighted_score[indices, 0]
-    state.update_max_min(best_score, params)
+    best_output = sorted_output[indices, 0]
+    update_max_min(params, state, best_output, best_score)
 
     # Clamp pheremone between tau_min and tau_max
     # Element-wise unsqueeze
@@ -497,11 +515,13 @@ def bounded_topk_update(
     # Update pheremone
     state.pheremone = new_pheremone
 
+    # For testing purposes
+    return score
 
-def compute_update(output: RolloutOutput, state: MMACSState, score: Tensor):
+
+def compute_update(state: MMACSState, output: RolloutOutput, score: Tensor):
     """Compute pheremone update matrix"""
-    batch_size, num_rollouts = output.shape
-    _, _, max_length = output.path.nodes.shape
+    batch_size, num_rollouts, max_length = output.path.nodes.shape
     update_matrix = torch.zeros_like(state.pheremone)
 
     # Batch and sim indices
@@ -535,10 +555,79 @@ def compute_update(output: RolloutOutput, state: MMACSState, score: Tensor):
     return update_matrix
 
 
+def update_max_min(
+    params: ACOParams,
+    state: MMACSState,
+    best_output: RolloutOutput,
+    best_score: Tensor,
+):
+    indices = torch.arange(state.shape[0])
+
+    is_better = best_score > state.best_score
+    better_i = indices[is_better]
+    if better_i.numel() == 0:
+        return
+
+    state.best_score[better_i] = best_score[better_i]
+    state.best_path[better_i] = best_output.path.nodes[better_i]
+    state.tau_max[better_i] = params.rho * state.best_score[better_i]
+    state.tau_min[better_i] = state.tau_max[better_i] / params.a
+
+
+# -- Evaluation
+def evaluate_rollouts(graph: TorchGraph, output: RolloutOutput):
+    batch_size, num_rollouts, max_length = output.path.nodes.shape
+
+    # Fetch precomputed samples
+    samples = graph.edges["samples"]
+    num_samples = samples.shape[-1]
+
+    # Batch and sim indices
+    b_indices = (
+        torch.arange(batch_size).unsqueeze(-1).expand((-1, num_rollouts)).flatten()
+    )
+    s_indices = torch.arange(batch_size * num_rollouts)
+
+    samples = graph.edges["samples"]
+
+    output = output.flatten()
+    total_sampled_cost = torch.zeros((batch_size * num_rollouts, num_samples))
+
+    path_index = 1
+    while path_index < max_length:
+        current_node = output.path.nodes[s_indices, path_index]
+
+        is_continuing = current_node != -1
+        b_indices, s_indices = b_indices[is_continuing], s_indices[is_continuing]
+        if s_indices.numel() == 0:
+            break
+
+        current_node = current_node[is_continuing]
+        prev_node = output.path.nodes[s_indices, path_index - 1]
+        s = samples[b_indices, prev_node, current_node]
+        total_sampled_cost[s_indices] += s
+
+        path_index += 1
+
+    # Avg cost length
+    avg_cost = (
+        total_sampled_cost.reshape(batch_size, num_rollouts, -1).sum(-1) / num_rollouts
+    )
+
+    # Failure Prob
+    budget = output.cost + output.residual
+    F = (total_sampled_cost > budget.unsqueeze(-1)).reshape(
+        (batch_size, num_rollouts, -1)
+    ).sum(-1) / num_samples
+
+    return avg_cost, F
+
+
 # -- Debugging
 def evaluate_ranking(
     graph: TorchGraph,
     output: RolloutOutput,
+    score: Tensor,
     num_samples: int,
     kappa: float,
     penalty: float = 0.1,
@@ -549,13 +638,6 @@ def evaluate_ranking(
 
     # Indices
     b_indices = torch.arange(batch_size).unsqueeze(-1).expand((-1, num_rollouts))
-
-    # Compute score
-    R = output.path.reward.sum(-1)
-    F = (output.residual < 0).float()
-    L = output.cost
-    # score = (R / L) * (1 - penalty * F)
-    score = R * (1 - penalty * F)
 
     sorted_i = torch.argsort(score, descending=True, dim=-1)
     sorted_output = output[b_indices, sorted_i]
@@ -591,7 +673,7 @@ def visualize_output(
             + f"R: {o.path.reward.sum(-1):.5f}, "
             + f"Sc: {float(o.cost):.5f}, "
             + f"Sr: {float(o.residual):.5f}, "
-            + f"B: {float(o.cost - o.residual):.5f}, "
+            + f"B: {float(o.cost + o.residual):.5f}, "
             + f"C: {float(avg_cost):.5f}, "
             + f"F: {float(failure_prob):.3f} "
             + f"N: {int(o.path.length)}"
