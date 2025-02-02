@@ -1,6 +1,7 @@
 from typing import Tuple, Callable, Optional
 from dataclasses import dataclass
 import time
+from tqdm import tqdm
 
 import torch
 from torch import Tensor
@@ -30,6 +31,15 @@ def small_heuristic(batch_size: int, num_nodes: int):
 def mcts_sopcc_heuristic(rewards: Tensor, sampled_costs: Tensor):
     average_cost = sampled_costs.mean(dim=-1)
     return rewards.unsqueeze(-1) / average_cost
+
+
+def mcts_sopcc_norm_heuristic(rewards: Tensor, sampled_costs: Tensor):
+    # Average and normalize costs
+    s = sampled_costs.mean(dim=-1)
+    s_norm = s / s.sum(dim=-1, keepdim=True)
+    # Average and normalize rewards
+    r_norm = rewards / rewards.sum(-1, keepdim=True)
+    return (r_norm.unsqueeze(-1) + 1e-5) / s_norm
 
 
 # ACO
@@ -83,6 +93,9 @@ def sop_aco_solver(
     path.append(indices, current_node)
     path.mask[indices, goal_node] = 1
 
+    # TQDM
+    pbar = tqdm()
+
     while indices.numel() > 0:
         next_node = aco_search(
             params=params,
@@ -114,6 +127,10 @@ def sop_aco_solver(
         is_continuing = torch.logical_and(is_not_goal, has_budget)
         indices = indices[is_continuing]
         current_node[indices] = next_node[is_continuing]
+
+        pbar.update()
+
+    pbar.close()
 
     # Check if run was success
     is_success = current_budget >= 0
@@ -194,6 +211,7 @@ def select_action(state: MMACSState):
     indices = torch.arange(state.shape[0])
     next_node = state.best_path[indices, 1]
     state.best_score = torch.full_like(state.best_score, -torch.inf)
+    state.pheremone = torch.ones_like(state.heuristic)
     return next_node
 
 
@@ -288,6 +306,12 @@ def aco_rollout(
     # Expand and flatten paths to size [B*S]
     sim_paths = sim_paths.unsqueeze(-1).expand(sim_shape).flatten().clone()
 
+    # Sample index to avoid resampling cost
+    num_samples = samples.shape[-1]
+    sample_index = torch.randint(
+        low=0, high=num_samples, size=(batch_size * num_rollouts,)
+    )
+
     while sim_indices.numel() > 0:
         # 0. Define action buffer
         new_nodes = torch.empty(flatten_shape, dtype=torch.long)
@@ -332,11 +356,18 @@ def aco_rollout(
             if s_suc_i.numel() > 0:
                 c = current_nodes[s_suc_i]
                 n = new_nodes[s_suc_i]
-                w = weights[b_suc_i, c, n]
 
-                # Sample and update budget
-                sampled_cost = sample_costs(w, num_samples=1, kappa=kappa)
-                simulated_budgets[s_suc_i] -= sampled_cost.squeeze(-1)
+                # Sample new cost and update budget
+                # w = weights[b_suc_i, c, n]
+                # sampled_cost = sample_costs(w, num_samples=1, kappa=kappa)
+                # simulated_budgets[s_suc_i] -= sampled_cost.squeeze(-1)
+
+                # Sample w/ buffer and update budget
+                si = sample_index[s_suc_i]
+                sampled_cost = samples[b_suc_i, c, n, si]
+                simulated_budgets[s_suc_i] -= sampled_cost
+                # Update sample_index
+                sample_index[s_suc_i] = (si + 1) % num_samples
 
                 # Add to path
                 r = rewards[b_suc_i, n]
@@ -359,11 +390,18 @@ def aco_rollout(
         if s_goal_i.numel() > 0:
             c = current_nodes[s_goal_i]
             n = new_nodes[s_goal_i]
-            w = weights[b_goal_i, c, n]
 
-            # Sample and update budget
-            sampled_cost = sample_costs(w, num_samples=1, kappa=kappa)
-            simulated_budgets[s_goal_i] -= sampled_cost.squeeze(-1)
+            # Sample new cost and update budget
+            # w = weights[b_goal_i, c, n]
+            # sampled_cost = sample_costs(w, num_samples=1, kappa=kappa)
+            # simulated_budgets[s_goal_i] -= sampled_cost.squeeze(-1)
+
+            # Sample w/ buffer and update budget
+            si = sample_index[s_goal_i]
+            sampled_cost = samples[b_goal_i, c, n, si]
+            simulated_budgets[s_goal_i] -= sampled_cost
+            # Update sample_index
+            sample_index[s_goal_i] = (si + 1) % num_samples
 
             # Add to path
             r = rewards[b_goal_i, n]

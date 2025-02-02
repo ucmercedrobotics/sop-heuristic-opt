@@ -37,7 +37,7 @@ def plot_solutions(
         colors[starting_node] = "r"
         colors[goal_node] = "g"
 
-        alpha = (1.0 * graph.nodes["reward"]).tolist()
+        alpha = torch.clamp((1.0 * graph.nodes["reward"]), min=0, max=1).tolist()
         alpha[starting_node] = 0.5
         alpha[goal_node] = 0.5
 

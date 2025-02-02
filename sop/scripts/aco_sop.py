@@ -22,6 +22,7 @@ from sop.mcts.aco import (
     ACOParams,
     sop_aco_solver,
     mcts_sopcc_heuristic,
+    mcts_sopcc_norm_heuristic,
     random_heuristic,
     small_heuristic,
 )
@@ -36,6 +37,7 @@ class Config:
     dataset_dir: str = "data"
     visual_dir: str = "viz"
     seed: Optional[int] = None
+    dataset_name: Optional[str] = None
     # Batch
     batch_size: int = 8
     device: str = DEVICE
@@ -107,15 +109,18 @@ def main(cfg: Config) -> None:
     # -- Generate Data
     # TODO: if file exists, import
     # TODO: if we begin to have multiple experiments of the same time, we can add more flags to the path
-    expected_graph_tensor_path = (
-        cfg.dataset_dir
-        + "/"
-        + str(cfg.seed)
-        + "_graphs_"
-        + str(cfg.batch_size)
-        + "_"
-        + str(cfg.num_nodes)
-    )
+    if cfg.dataset_name is not None:
+        expected_graph_tensor_path = os.path.join(cfg.dataset_dir, cfg.dataset_name)
+    else:
+        expected_graph_tensor_path = (
+            cfg.dataset_dir
+            + "/"
+            + str(cfg.seed)
+            + "_graphs_"
+            + str(cfg.batch_size)
+            + "_"
+            + str(cfg.num_nodes)
+        )
     if os.path.isfile(expected_graph_tensor_path):
         print(f"Loading graphs from {expected_graph_tensor_path}...")
         graphs = TorchGraph.load(expected_graph_tensor_path)
@@ -131,13 +136,20 @@ def main(cfg: Config) -> None:
             cfg.kappa,
         )
 
+    cfg.batch_size, cfg.num_nodes = graphs.size()
+    print(cfg.batch_size, cfg.num_nodes)
+    if cfg.dataset_name is not None:
+        viz_name = cfg.dataset_name
+    else:
+        viz_name = f"{cfg.seed}_{cfg.batch_size}_{cfg.num_nodes}"
+
     viz_path = cfg.dataset_dir + "/" + cfg.visual_dir
     print(f"Creating vizualization folder {viz_path}...")
     os.makedirs(viz_path, exist_ok=True)
-    viz_prefix = f"{viz_path}/{cfg.seed}_{cfg.batch_size}_{cfg.num_nodes}"
+    viz_prefix = f"{viz_path}/{viz_name}"
 
     # -- Get first graph for testing
-    first_graph = graphs[0].cpu()
+    # first_graph = graphs[0].cpu()
 
     # -- MILP
     # run_milp(cfg, first_graph, viz_prefix)
@@ -146,8 +158,8 @@ def main(cfg: Config) -> None:
     print("Generating Heuristic...")
     random_H = random_heuristic(cfg.batch_size, cfg.num_nodes)
     small_H = small_heuristic(cfg.batch_size, cfg.num_nodes)
-    sopcc_H = mcts_sopcc_heuristic(graphs.nodes["reward"], graphs.edges["samples"])
-    heuristic = random_H
+    sopcc_H = mcts_sopcc_norm_heuristic(graphs.nodes["reward"], graphs.edges["samples"])
+    heuristic = sopcc_H
 
     # -- ACO Tuning
     def objective(trial):
@@ -186,7 +198,7 @@ def main(cfg: Config) -> None:
     # study.optimize(objective, n_trials=100)
 
     # Test avg performance on a single graph
-    n = 10
+    n = 1
     graph = graphs[0]
     broadcasted_graph = graph.unsqueeze(0).expand(n)
     heuristic = heuristic[0].unsqueeze(0).expand(n, cfg.num_nodes, cfg.num_nodes)
@@ -220,19 +232,19 @@ def main(cfg: Config) -> None:
     # -- Evaluation
     # print("Visualize...")
     failure_prob, avg_cost = evaluate_path(
-        path[0].unsqueeze(0), first_graph.unsqueeze(0), cfg.num_samples, cfg.kappa
+        path[0].unsqueeze(0), graph.unsqueeze(0), cfg.num_samples, cfg.kappa
     )
     aco_info = (
         "ACO; "
         + f"R: {path[0].reward.sum(-1):.5f}, "
-        + f"B: {cfg.budget}, "
+        + f"B: {float(graph.extra['budget'])}, "
         + f"C: {float(avg_cost):.5f}, "
         + f"F: {float(failure_prob):.3f} "
         + f"N: {int(path[0].length)}"
     )
     print(aco_info)
     plot_solutions(
-        first_graph,
+        graph,
         paths=[path[0]],
         titles=[aco_info],
         out_path=viz_prefix + "_aco",
