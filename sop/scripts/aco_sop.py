@@ -198,7 +198,7 @@ def main(cfg: Config) -> None:
     # study.optimize(objective, n_trials=100)
 
     # Test avg performance on a single graph
-    n = 1
+    n = 10
     graph = graphs[0]
     broadcasted_graph = graph.unsqueeze(0).expand(n)
     heuristic = heuristic[0].unsqueeze(0).expand(n, cfg.num_nodes, cfg.num_nodes)

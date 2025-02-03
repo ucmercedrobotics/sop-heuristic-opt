@@ -94,7 +94,7 @@ def sop_aco_solver(
     path.mask[indices, goal_node] = 1
 
     # TQDM
-    pbar = tqdm()
+    # pbar = tqdm()
 
     while indices.numel() > 0:
         next_node = aco_search(
@@ -128,9 +128,9 @@ def sop_aco_solver(
         indices = indices[is_continuing]
         current_node[indices] = next_node[is_continuing]
 
-        pbar.update()
+        # pbar.update()
 
-    pbar.close()
+    # pbar.close()
 
     # Check if run was success
     is_success = current_budget >= 0
@@ -184,22 +184,25 @@ def aco_search(
     kappa: float,
 ) -> Tuple[Tensor]:
     def scoring_fn(params, graph, output):
-        return fail_prob_scoring_fn(params, graph, output, p_f)
+        # return fail_prob_scoring_fn(params, graph, output, p_f)
+        return weighted_fail_prob_scoring_fn(params, graph, output, p_f)
 
     for k in range(num_iterations):
         # TODO: There is a looping bug somewhere.. appears sometimes...
+        score = (state.pheremone**params.alpha) * (state.heuristic**params.beta)
+
         output = aco_rollout(
             params,
-            state,
+            score,
             graph,
             current_path,
             current_node,
             current_budget,
             num_rollouts,
             p_f,
-            kappa,
-            action_selection_fn=ada_ir_action_selection,
+            action_selection_fn=ada_ir_action_selection2,
         )
+
         score = bounded_topk_update(
             params, state, graph, output, k=None, scoring_fn=scoring_fn
         )
@@ -228,7 +231,7 @@ def ir_action_selection(
 ):
     score = (pheremone**params.alpha) * (heuristic**params.beta)
     r = torch.rand_like(score)
-    return torch.argmax(torch.masked_fill(score * r, mask, 0), dim=-1).squeeze()
+    return torch.argmax(torch.masked_fill(score * r, mask, 0), dim=-1)
 
 
 def ada_ir_action_selection(
@@ -237,7 +240,14 @@ def ada_ir_action_selection(
     score = (pheremone**params.alpha) * (heuristic**params.beta)
     r = torch.rand_like(score) ** params.lr
     sr = score * r
-    action = torch.argmax(torch.masked_fill(sr, mask, 0), dim=-1).squeeze()
+    action = torch.argmax(torch.masked_fill(sr, mask, 0), dim=-1)
+    return action
+
+
+def ada_ir_action_selection2(params: ACOParams, score: Tensor, mask: Tensor):
+    r = torch.rand_like(score) ** params.lr
+    sr = score * r
+    action = torch.argmax(torch.masked_fill(sr, mask, 0), dim=-1)
     return action
 
 
@@ -249,176 +259,164 @@ class RolloutOutput:
     residual: Tensor
 
 
-def aco_rollout(
+@tensorclass
+class RolloutState:
+    batch_i: Tensor
+    current_node: Tensor
+    budget: Tensor
+    path: Path
+    failure_mask: Tensor
+
+    @classmethod
+    def empty(
+        cls,
+        graph: TorchGraph,
+        current_path: Tensor,
+        current_node: Tensor,
+        current_budget: Tensor,
+    ):
+        batch_size, num_nodes = graph.size()
+        indices = torch.arange(batch_size)
+
+        # Create path and add current node
+        sim_path = Path.empty(batch_size, num_nodes)
+        sim_path.mask = current_path.mask
+        r = graph.nodes["reward"][indices, current_node]
+        sim_path.append(indices, current_node, r)
+
+        return RolloutState(
+            batch_i=indices,
+            current_node=current_node,
+            budget=current_budget,
+            path=sim_path,
+            failure_mask=torch.zeros((batch_size, num_nodes), dtype=torch.bool),
+            batch_size=[batch_size],
+        )
+
+    def update(self, indices: Tensor, new_node: Tensor, reward: Tensor, cost: Tensor):
+        self.budget[indices] -= cost
+        self.path.append(indices, new_node, reward)
+        self.current_node[indices] = new_node
+        self.failure_mask[indices] = 0
+
+    def update_failure_mask(self, indices: Tensor, new_node: Tensor):
+        self.failure_mask[indices, new_node] = 1
+
+
+def aco_rollout2(
     params: ACOParams,
-    state: MMACSState,
+    score: Tensor,
     graph: TorchGraph,
     current_path: Tensor,
-    starting_node: Tensor,
-    budget: Tensor,
+    current_node: Tensor,
+    current_budget: Tensor,
     num_rollouts: int,
     p_f: float,
-    kappa: float,
     action_selection_fn: Callable,
-) -> RolloutOutput:
+):
     # Define shapes
     batch_size, num_nodes = graph.size()
     sim_shape = (batch_size, num_rollouts)
     flatten_shape = (batch_size * num_rollouts,)
 
-    # Preload data
-    samples = graph.edges["samples"]
-    weights = graph.edges["distance"]
+    # Data alias
     goal_node = graph.extra["goal_node"]
     rewards = graph.nodes["reward"]
+    samples = graph.edges["samples"]
 
-    # Create indices
-    indices = torch.arange(batch_size)
-    # batch_indices will query batch-level resources, like graph rewards and edge weights
-    batch_indices = (
-        torch.arange(batch_size).unsqueeze(-1).expand(sim_shape).flatten()
-    )  # [B*S]
-    # sim_indices will query simulation level resources, like simulated_budget and masks
-    sim_indices = torch.arange(batch_size * num_rollouts)  # [B*S]
+    # Create rollout state
+    rollout_state = RolloutState.empty(
+        graph, current_path, current_node, current_budget
+    )
+    # Expand rollout from [batch_size,] -> [batch_size, num_rollouts]
+    rollout_state = rollout_state.unsqueeze(-1).expand(sim_shape)
+    # Flatten state [batch_size, num_rollouts] -> [batch_size * num_rollouts]
+    rollout_state = rollout_state.flatten().clone()
 
-    # Local Failure mask
-    failure_mask = torch.zeros((batch_size * num_rollouts, num_nodes))
-
-    # Sample traverse cost
-    # ts = sample_traverse_cost(current_path, graph, num_rollouts, kappa)
-    # sampled_budgets = budget.unsqueeze(-1) - ts  # [B, S]
-    # starting_budgets = sampled_budgets.flatten().clone()
-    # No need to sample budgets...
-    starting_budgets = budget.unsqueeze(-1).expand(-1, num_rollouts).flatten().clone()
-    simulated_budgets = starting_budgets.clone()
-
-    # Loop State
-    current_nodes = (
-        starting_node.unsqueeze(-1).broadcast_to(sim_shape).flatten().clone()
-    )  # [B*S]
-
-    # Create Paths and add mask for previous nodes
-    sim_paths = Path.empty(batch_size, num_nodes)
-    sim_paths.mask = current_path.mask.clone()
-    leaf_r = rewards[indices, starting_node]
-    sim_paths.append(indices, starting_node, leaf_r)
-
-    # Expand and flatten paths to size [B*S]
-    sim_paths = sim_paths.unsqueeze(-1).expand(sim_shape).flatten().clone()
+    # Create sim indices
+    sim_i = torch.arange(batch_size * num_rollouts)
 
     # Sample index to avoid resampling cost
     num_samples = samples.shape[-1]
-    sample_index = torch.randint(
-        low=0, high=num_samples, size=(batch_size * num_rollouts,)
-    )
+    sample_i = torch.randint(low=0, high=num_samples, size=flatten_shape)
 
-    while sim_indices.numel() > 0:
-        # 0. Define action buffer
-        new_nodes = torch.empty(flatten_shape, dtype=torch.long)
-
-        # 1. Action selection
-        # 1a. Compute valid node mask
-        mask = torch.logical_or(sim_paths.mask[sim_indices], failure_mask[sim_indices])
+    while sim_i.numel() > 0:
+        # -- 1. Compute mask
+        rs = rollout_state[sim_i]
+        mask = torch.logical_or(rs.path.mask, rs.failure_mask)
         is_invalid = mask.sum(-1) == num_nodes
         is_valid = ~is_invalid
 
-        # 1b. If mask has no valid nodes, go to goal
-        b_invalid_i, s_invalid_i = batch_indices[is_invalid], sim_indices[is_invalid]
-        if s_invalid_i.numel() > 0:
-            new_nodes[s_invalid_i] = goal_node[b_invalid_i].clone()
+        # -- 2. Valid Nodes
+        # a. Choose new node
+        # b. check if failure_prob < p_f
+        # c. Add to path or update failure mask
+        valid_i = sim_i[is_valid]
+        if valid_i.numel() > 0:
+            rs = rollout_state[valid_i]
+            valid_m = mask[is_valid]
 
-        # 1c. Action Selection
-        b_valid_i, s_valid_i = batch_indices[is_valid], sim_indices[is_valid]
-        mask = mask[is_valid]
-        c = current_nodes[s_valid_i]
-        p = state.pheremone[b_valid_i, c]
-        h = state.heuristic[b_valid_i, c]
-        new_nodes[s_valid_i] = action_selection_fn(params, p, h, mask)
+            # 2a. Sample new node
+            s = score[rs.batch_i, rs.current_node]
+            new_node = action_selection_fn(params, s, valid_m)
 
-        # 2. Determine if action is goal
-        b_cont_i, s_cont_i = b_valid_i, s_valid_i
+            # 2b. Check if failure_prob < p_f
+            g = goal_node[rs.batch_i]
+            sample_c_n = samples[rs.batch_i, rs.current_node, new_node]
+            sample_n_g = samples[rs.batch_i, new_node, g]
+            failure_prob = compute_failure_prob(sample_c_n, sample_n_g, rs.budget)
 
-        # 3. If not goal, compute failure probability
-        if s_cont_i.numel() > 0:
-            # 3a. Compute failure probability
-            c = current_nodes[s_cont_i]
-            n = new_nodes[s_cont_i]
-            g = goal_node[b_cont_i]
-            b = simulated_budgets[s_cont_i]
-            sample_c_n = samples[b_cont_i, c, n]
-            sample_n_g = samples[b_cont_i, n, g]
-            failure_prob = compute_failure_prob(sample_c_n, sample_n_g, b)
-
-            # Determine whether node failed or succeeded
             below_failure = failure_prob <= p_f
-            b_suc_i, s_suc_i = b_cont_i[below_failure], s_cont_i[below_failure]
-            # 3b. if Pr[...] <= p_f, add to path
-            if s_suc_i.numel() > 0:
-                c = current_nodes[s_suc_i]
-                n = new_nodes[s_suc_i]
+            below_i = valid_i[below_failure]
+            # 2c. if Pr[...] <= p_f, add to path
+            if below_i.numel() > 0:
+                rs = rollout_state[below_i]
+                n = new_node[below_failure]
 
-                # Sample new cost and update budget
-                # w = weights[b_suc_i, c, n]
-                # sampled_cost = sample_costs(w, num_samples=1, kappa=kappa)
-                # simulated_budgets[s_suc_i] -= sampled_cost.squeeze(-1)
+                # Sample w/ buffer
+                si = sample_i[below_i]
+                sampled_cost = samples[rs.batch_i, rs.current_node, n, si]
+                sample_i[below_i] = (si + 1) % num_samples
+                # Get reward
+                r = rewards[rs.batch_i, n]
 
-                # Sample w/ buffer and update budget
-                si = sample_index[s_suc_i]
-                sampled_cost = samples[b_suc_i, c, n, si]
-                simulated_budgets[s_suc_i] -= sampled_cost
-                # Update sample_index
-                sample_index[s_suc_i] = (si + 1) % num_samples
+                # Update rollout state
+                rollout_state.update(below_i, n, r, sampled_cost)
 
-                # Add to path
-                r = rewards[b_suc_i, n]
-                sim_paths.append(s_suc_i, n, r)
+            above_failure = ~below_failure
+            fail_i = valid_i[above_failure]
+            # 2d. Update local failure mask so we don't choose this again
+            if fail_i.numel() > 0:
+                n = new_node[above_failure]
+                rollout_state.update_failure_mask(fail_i, n)
 
-                # Change current node
-                current_nodes[s_suc_i] = n
+        # -- 3. Invalid nodes
+        # a. Go to goal node
+        invalid_i = sim_i[is_invalid]
+        if invalid_i.numel() > 0:
+            rs = rollout_state[invalid_i]
+            g = goal_node[rs.batch_i]
 
-                # Clear failure mask
-                failure_mask[s_suc_i] = 0
+            # Sample w/ buffer
+            si = sample_i[invalid_i]
+            sampled_cost = samples[rs.batch_i, rs.current_node, g, si]
+            sample_i[invalid_i] = (si + 1) % num_samples
+            # Get reward
+            r = rewards[rs.batch_i, g]
 
-            # 3c. Update local failure mask so we don't choose this again
-            s_fail_i = s_cont_i[~below_failure]
-            if s_fail_i.numel() > 0:
-                n = new_nodes[s_fail_i]
-                failure_mask[s_fail_i, n] = 1
+            rollout_state.update(invalid_i, g, r, sampled_cost)
 
-        # 4: else is goal, add to path and return
-        b_goal_i, s_goal_i = b_invalid_i, s_invalid_i
-        if s_goal_i.numel() > 0:
-            c = current_nodes[s_goal_i]
-            n = new_nodes[s_goal_i]
-
-            # Sample new cost and update budget
-            # w = weights[b_goal_i, c, n]
-            # sampled_cost = sample_costs(w, num_samples=1, kappa=kappa)
-            # simulated_budgets[s_goal_i] -= sampled_cost.squeeze(-1)
-
-            # Sample w/ buffer and update budget
-            si = sample_index[s_goal_i]
-            sampled_cost = samples[b_goal_i, c, n, si]
-            simulated_budgets[s_goal_i] -= sampled_cost
-            # Update sample_index
-            sample_index[s_goal_i] = (si + 1) % num_samples
-
-            # Add to path
-            r = rewards[b_goal_i, n]
-            sim_paths.append(s_goal_i, n, r)
-
-        # 5. Update Loop State
-        batch_indices, sim_indices = b_valid_i, s_valid_i
+        # 4. Update Loop State
+        sim_i = valid_i
 
     # Format output
-    sim_paths = sim_paths.reshape(sim_shape)
-    sim_costs = (starting_budgets - simulated_budgets).reshape(sim_shape)
-    sim_residuals = simulated_budgets.reshape(sim_shape)
+    rollout_state = rollout_state.reshape(sim_shape)
+    rollout_cost = current_budget.unsqueeze(-1) - rollout_state.budget
 
     return RolloutOutput(
-        path=sim_paths,
-        cost=sim_costs,
-        residual=sim_residuals,
+        path=rollout_state.path,
+        cost=rollout_cost,
+        residual=rollout_state.budget,
         batch_size=[batch_size, num_rollouts],
     )
 
@@ -490,6 +488,15 @@ def fail_prob_avg_cost_scoring_fn(
     avg_cost, failure_prob = evaluate_rollouts(graph, output)
     F = failure_prob > p_f
     return (R / avg_cost) * (1 - params.fail_penalty * F)
+
+
+def weighted_fail_prob_scoring_fn(
+    params: ACOParams, graph: TorchGraph, output: RolloutOutput, p_f: float
+):
+    R = output.path.reward.sum(-1)
+    avg_cost, failure_prob = evaluate_rollouts(graph, output)
+    F = torch.clamp(failure_prob - p_f, min=0)
+    return R * (1 - params.fail_penalty * F)
 
 
 # -- Update Pheremone
