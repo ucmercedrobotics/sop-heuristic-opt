@@ -9,7 +9,6 @@ def random_seed() -> int:
 
 def set_seed(seed: int) -> None:
     np.random.seed(seed)
-    random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)

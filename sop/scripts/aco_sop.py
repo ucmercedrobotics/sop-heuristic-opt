@@ -9,6 +9,7 @@ from hydra.core.config_store import ConfigStore
 import torch
 import rootutils
 import optuna
+import numpy as np
 
 root = rootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
 
@@ -61,42 +62,6 @@ cs = ConfigStore.instance()
 cs.store(name="aco_sop", node=Config)
 
 
-def run_milp(cfg: Config, graph: TorchGraph, viz_prefix: Optional[None]):
-    milp_path = sop_milp_solver(
-        graph, time_limit=cfg.milp_time_limit, num_samples=cfg.num_samples
-    )
-    failure_prob, avg_cost = evaluate_path(
-        milp_path, graph.unsqueeze(0), cfg.num_samples, cfg.kappa
-    )
-    milp_info = (
-        "MILP; "
-        + f"R: {milp_path.reward.sum(-1)[0]:.5f}, "
-        + f"B: {cfg.budget}, "
-        + f"C: {float(avg_cost):.5f}, "
-        + f"F: {float(failure_prob):.3f} "
-        + f"N: {int(milp_path.length[0])}"
-    )
-    print(milp_info)
-    out_path = viz_prefix + "_milp" if viz_prefix is not None else None
-    plot_solutions(
-        graph,
-        paths=[milp_path[0]],
-        titles=[milp_info],
-        out_path=out_path,
-        rows=1,
-        cols=1,
-    )
-
-    out_path = viz_prefix + "_milp_heatmap" if viz_prefix is not None else None
-    plot_heuristics(
-        heuristics=[path_to_heatmap(milp_path)[0]],
-        titles=["Milp_H"],
-        out_path=out_path,
-        rows=1,
-        cols=1,
-    )
-
-
 @hydra.main(version_base=None, config_name="aco_sop")
 def main(cfg: Config) -> None:
     torch.set_default_device(cfg.device)
@@ -126,6 +91,7 @@ def main(cfg: Config) -> None:
         graphs = TorchGraph.load(expected_graph_tensor_path)
     else:
         print(f"Generating {cfg.batch_size} graphs...")
+        cfg.goal_node = min(cfg.goal_node, cfg.num_nodes - 1)
         graphs = generate_sop_graphs(
             cfg.batch_size,
             cfg.num_nodes,
@@ -147,12 +113,6 @@ def main(cfg: Config) -> None:
     print(f"Creating vizualization folder {viz_path}...")
     os.makedirs(viz_path, exist_ok=True)
     viz_prefix = f"{viz_path}/{viz_name}"
-
-    # -- Get first graph for testing
-    # first_graph = graphs[0].cpu()
-
-    # -- MILP
-    # run_milp(cfg, first_graph, viz_prefix)
 
     # -- Generate Heuristic
     print("Generating Heuristic...")
@@ -198,9 +158,9 @@ def main(cfg: Config) -> None:
     # study.optimize(objective, n_trials=100)
 
     # Test avg performance on a single graph
-    n = 10
+    n = 1
     graph = graphs[0]
-    broadcasted_graph = graph.unsqueeze(0).expand(n)
+    broadcasted_graph = graph.unsqueeze(0).expand(n).clone()
     heuristic = heuristic[0].unsqueeze(0).expand(n, cfg.num_nodes, cfg.num_nodes)
 
     # -- Solve SOP

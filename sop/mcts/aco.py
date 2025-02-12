@@ -2,9 +2,11 @@ from typing import Tuple, Callable, Optional
 from dataclasses import dataclass
 import time
 from tqdm import tqdm
+import math
 
 import torch
 from torch import Tensor
+from torch.distributions import Categorical
 
 from tensordict import TensorDict, tensorclass
 
@@ -56,10 +58,12 @@ class ACOParams:
     alpha: float = 1.0
     beta: float = 1.0
     rho: float = 0.1
+    init_lr: float = 2.0
+    max_lr: float = 0.9
     lr: float = 1.0
     fail_penalty: float = 1.0
     a: float = 5
-    topk: int = 10
+    topk: int = 100
 
 
 @torch.no_grad
@@ -94,7 +98,7 @@ def sop_aco_solver(
     path.mask[indices, goal_node] = 1
 
     # TQDM
-    # pbar = tqdm()
+    pbar = tqdm()
 
     while indices.numel() > 0:
         next_node = aco_search(
@@ -107,7 +111,6 @@ def sop_aco_solver(
             num_rollouts=num_rollouts,
             num_iterations=num_iterations,
             p_f=p_f,
-            kappa=kappa,
         )
 
         # Get values
@@ -128,9 +131,9 @@ def sop_aco_solver(
         indices = indices[is_continuing]
         current_node[indices] = next_node[is_continuing]
 
-        # pbar.update()
+        pbar.update()
 
-    # pbar.close()
+    pbar.close()
 
     # Check if run was success
     is_success = current_budget >= 0
@@ -181,19 +184,22 @@ def aco_search(
     num_rollouts: int,
     num_iterations: int,
     p_f: float,
-    kappa: float,
 ) -> Tuple[Tensor]:
     def scoring_fn(params, graph, output):
         # return fail_prob_scoring_fn(params, graph, output, p_f)
-        return weighted_fail_prob_scoring_fn(params, graph, output, p_f)
+        # return weighted_fail_prob_scoring_fn(params, graph, output, p_f)
+        return carpin_alpha_scoring_fn(params, graph, output, p_f)
 
     for k in range(num_iterations):
-        # TODO: There is a looping bug somewhere.. appears sometimes...
         score = (state.pheremone**params.alpha) * (state.heuristic**params.beta)
+        params.lr = cosine_annealing_lr(
+            k, num_iterations, params.init_lr, params.max_lr
+        )
 
         output = aco_rollout(
             params,
-            score,
+            # score,
+            state.heuristic,
             graph,
             current_path,
             current_node,
@@ -201,11 +207,10 @@ def aco_search(
             num_rollouts,
             p_f,
             action_selection_fn=ada_ir_action_selection2,
+            # action_selection_fn=reinforce_action_selection,
         )
 
-        score = bounded_topk_update(
-            params, state, graph, output, k=None, scoring_fn=scoring_fn
-        )
+        bounded_topk_update(params, state, graph, output, k=None, scoring_fn=scoring_fn)
 
     return select_action(state)
 
@@ -237,6 +242,7 @@ def ir_action_selection(
 def ada_ir_action_selection(
     params: ACOParams, pheremone: Tensor, heuristic: Tensor, mask: Tensor
 ):
+    # Taken from TensorACO: TODO
     score = (pheremone**params.alpha) * (heuristic**params.beta)
     r = torch.rand_like(score) ** params.lr
     sr = score * r
@@ -251,12 +257,34 @@ def ada_ir_action_selection2(params: ACOParams, score: Tensor, mask: Tensor):
     return action
 
 
+def reinforce_action_selection(
+    params: ACOParams, score: Tensor, mask: Tensor, return_log_prob: bool = False
+):
+    # Taken from DeepACO: https://github.com/henry-yeh/DeepACO/blob/main/tsp/aco.py
+    masked_score = torch.masked_fill(score, mask, -torch.inf)
+    dist = Categorical(logits=masked_score)
+    actions = dist.sample()
+    if return_log_prob:
+        log_prob = dist.log_prob(actions)
+        return actions, log_prob
+    return actions
+
+
+# -- Schedulers
+def cosine_annealing_lr(epoch, num_epochs=5, base_lr=2, max_lr=0.9):
+    cos_inner = math.pi * (epoch % (num_epochs // 2))
+    cos_inner /= num_epochs // 2
+    lr = base_lr + 0.5 * (max_lr - base_lr) * (1 + math.cos(cos_inner))
+    return lr
+
+
 # -- Rollout
 @tensorclass
 class RolloutOutput:
     path: Path
     cost: Tensor
     residual: Tensor
+    log_probs: Optional[Tensor]
 
 
 @tensorclass
@@ -266,6 +294,7 @@ class RolloutState:
     budget: Tensor
     path: Path
     failure_mask: Tensor
+    log_probs: Optional[Tensor]
 
     @classmethod
     def empty(
@@ -274,6 +303,7 @@ class RolloutState:
         current_path: Tensor,
         current_node: Tensor,
         current_budget: Tensor,
+        store_log_probs: bool = False,
     ):
         batch_size, num_nodes = graph.size()
         indices = torch.arange(batch_size)
@@ -284,26 +314,44 @@ class RolloutState:
         r = graph.nodes["reward"][indices, current_node]
         sim_path.append(indices, current_node, r)
 
+        # Log prob buffer
+        if store_log_probs:
+            probs = torch.zeros((batch_size, num_nodes))
+        else:
+            probs = None
+
         return RolloutState(
             batch_i=indices,
             current_node=current_node,
             budget=current_budget,
             path=sim_path,
             failure_mask=torch.zeros((batch_size, num_nodes), dtype=torch.bool),
+            log_probs=probs,
             batch_size=[batch_size],
         )
 
-    def update(self, indices: Tensor, new_node: Tensor, reward: Tensor, cost: Tensor):
+    def update(
+        self,
+        indices: Tensor,
+        new_node: Tensor,
+        reward: Tensor,
+        cost: Tensor,
+        log_probs: Optional[Tensor] = None,
+    ):
         self.budget[indices] -= cost
         self.path.append(indices, new_node, reward)
         self.current_node[indices] = new_node
         self.failure_mask[indices] = 0
 
+        if log_probs is not None:
+            length = self.path.length[indices] - 1
+            self.log_probs[indices, length] = log_probs
+
     def update_failure_mask(self, indices: Tensor, new_node: Tensor):
         self.failure_mask[indices, new_node] = 1
 
 
-def aco_rollout2(
+def aco_rollout(
     params: ACOParams,
     score: Tensor,
     graph: TorchGraph,
@@ -313,6 +361,7 @@ def aco_rollout2(
     num_rollouts: int,
     p_f: float,
     action_selection_fn: Callable,
+    store_log_probs: bool = False,
 ):
     # Define shapes
     batch_size, num_nodes = graph.size()
@@ -326,7 +375,7 @@ def aco_rollout2(
 
     # Create rollout state
     rollout_state = RolloutState.empty(
-        graph, current_path, current_node, current_budget
+        graph, current_path, current_node, current_budget, store_log_probs
     )
     # Expand rollout from [batch_size,] -> [batch_size, num_rollouts]
     rollout_state = rollout_state.unsqueeze(-1).expand(sim_shape)
@@ -358,7 +407,12 @@ def aco_rollout2(
 
             # 2a. Sample new node
             s = score[rs.batch_i, rs.current_node]
-            new_node = action_selection_fn(params, s, valid_m)
+            if store_log_probs:
+                new_node, log_probs = action_selection_fn(
+                    params, s, valid_m, store_log_probs
+                )
+            else:
+                new_node = action_selection_fn(params, s, valid_m)
 
             # 2b. Check if failure_prob < p_f
             g = goal_node[rs.batch_i]
@@ -381,7 +435,11 @@ def aco_rollout2(
                 r = rewards[rs.batch_i, n]
 
                 # Update rollout state
-                rollout_state.update(below_i, n, r, sampled_cost)
+                if store_log_probs:
+                    l = log_probs[below_failure]
+                    rollout_state.update(below_i, n, r, sampled_cost, l)
+                else:
+                    rollout_state.update(below_i, n, r, sampled_cost)
 
             above_failure = ~below_failure
             fail_i = valid_i[above_failure]
@@ -417,6 +475,7 @@ def aco_rollout2(
         path=rollout_state.path,
         cost=rollout_cost,
         residual=rollout_state.budget,
+        log_probs=rollout_state.log_probs,
         batch_size=[batch_size, num_rollouts],
     )
 
@@ -499,6 +558,23 @@ def weighted_fail_prob_scoring_fn(
     return R * (1 - params.fail_penalty * F)
 
 
+def carpin_scoring_fn(
+    params: ACOParams, graph: TorchGraph, output: RolloutOutput, p_f: float
+):
+    R = output.path.reward.sum(-1)
+    avg_cost, failure_prob = evaluate_rollouts(graph, output)
+    return R * (1 - failure_prob)
+
+
+def carpin_alpha_scoring_fn(
+    params: ACOParams, graph: TorchGraph, output: RolloutOutput, p_f: float
+):
+    R = output.path.reward.sum(-1)
+    avg_cost, failure_prob = evaluate_rollouts(graph, output)
+    F = torch.clamp(failure_prob - p_f, min=0)
+    return R * (1 - F)
+
+
 # -- Update Pheremone
 # formulas for MMACS w/ rank based pheremone update
 # Bounds:
@@ -554,6 +630,9 @@ def bounded_topk_update(
     # Element-wise unsqueeze
     tau_min = state.tau_min.unsqueeze(-1).unsqueeze(-1)
     tau_max = state.tau_max.unsqueeze(-1).unsqueeze(-1)
+
+    # Normalize pheremone
+    new_pheremone = new_pheremone / torch.sum(new_pheremone, dim=-1, keepdim=True)
 
     new_pheremone = torch.clamp(new_pheremone, min=tau_min, max=tau_max)
 
