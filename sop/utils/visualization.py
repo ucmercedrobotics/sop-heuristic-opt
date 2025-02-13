@@ -1,4 +1,5 @@
 from typing import Optional
+from dataclasses import dataclass
 import matplotlib.pyplot as plt
 import numpy as np
 import graphviz
@@ -157,3 +158,64 @@ def plot_tree(tree: Tree):
     add_node(dot, tree, 0)
 
     return dot
+
+
+# -- Stats
+@dataclass
+class Stats:
+    paths: Path
+    min_reward: float
+    avg_reward: float
+    max_reward: float
+    failure_prob: float
+
+
+def plot_statistics(
+    stats: list[Stats],
+    titles: list[str],
+    out_path: Optional[str] = None,
+    rows: int = 2,
+    cols: int = 2,
+):
+    assert len(stats) == len(titles)
+
+    categories = ["Min", "Max", "Avg", "p_f"]
+    y_labels = ["Reward", "Reward", "Reward", "Probability"]
+    data = {
+        "Min": [s.min_reward for s in stats],
+        "Max": [s.max_reward for s in stats],
+        "Avg": [s.avg_reward for s in stats],
+        "p_f": [s.failure_prob for s in stats],
+    }
+
+    fig, axes = plt.subplots(rows, cols, figsize=(12, 8))
+    if rows * cols == 1:
+        axes = [axes]
+    else:
+        axes = axes.flatten()
+
+    for i, category in enumerate(data.keys()):
+        ax = axes[i]
+        x = np.arange(len(titles))
+        width = 0.5
+        for j, title in enumerate(categories):
+            ax.bar(x[j], data[category][i], width, label=title)
+
+        ax.set_title(category)
+        ax.set_xticks(x)
+        ax.set_xticklabels(titles)
+        ax.set_ylabel(y_labels[i])
+
+    # Add legend only once
+    # handles = [plt.Rectangle((0, 0), 1, 1) for i in range(len(titles))]
+    # fig.legend(handles, titles, title="Method", loc="upper right")
+
+    # Hide unused subplots
+    for i in range(len(titles), len(axes)):
+        fig.delaxes(axes[i])  # Removes empty subplot spaces
+
+    plt.tight_layout()
+    if out_path is not None:
+        plt.savefig(out_path)
+    else:
+        plt.show()

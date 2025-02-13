@@ -1,4 +1,5 @@
 from typing import Tuple, Callable, Optional
+import random
 from dataclasses import dataclass
 import time
 from tqdm import tqdm
@@ -27,6 +28,7 @@ def sop_aco_solver(
     num_iterations: int,
     p_f: float,
     kappa: float,
+    search_fn: Callable,
 ) -> Tuple[Path, Tensor]:
     start_node = graph.extra["start_node"]
     budget = graph.extra["budget"]
@@ -53,7 +55,8 @@ def sop_aco_solver(
     # Main Loop
     while indices.numel() > 0:
         # Get next node
-        next_node = search(
+        # next_node = search(
+        next_node = search_fn(
             heuristic=heuristic[indices],
             graph=graph[indices],
             current_node=current_node[indices],
@@ -113,11 +116,47 @@ def search(
     )
     scores = reward_failure_scoring_fn(output, p_f)
 
-    sorted_output, sorted_scores = rank_output(output, scores)
+    sorted_output, _, _ = rank_output(output, scores)
 
     best_path = sorted_output.path[indices, 0]
     next_node = best_path.nodes[indices, 1]
 
+    return next_node
+
+
+def aco_search(
+    heuristic: Tensor,
+    graph: TorchGraph,
+    current_node: Tensor,
+    current_budget: Tensor,
+    current_path: Path,
+    num_rollouts: int,
+    num_iterations: int,
+    p_f: float,
+) -> Tensor:
+    batch_size, num_nodes = graph.size()
+    indices = torch.arange(batch_size)
+
+    state = ACOState.init(heuristic)
+
+    alpha = 1
+    beta = 1
+
+    for k in range(num_iterations):
+        score = (state.pheremone**alpha) * (heuristic**beta)
+        output = rollout(
+            score,
+            graph,
+            current_node,
+            current_budget,
+            current_path,
+            num_rollouts,
+            p_f,
+        )
+        scores = reward_failure_scoring_fn(output, p_f)
+        pheremone_update(state, graph, output, scores, topk=10)
+
+    next_node = state.best_path[indices, 1]
     return next_node
 
 
@@ -129,6 +168,30 @@ def categorical_action_selection(
     masked_score = torch.masked_fill(score, mask, -torch.inf)
     dist = Categorical(logits=masked_score)
     actions = dist.sample()
+    if store_log_probs:
+        log_prob = dist.log_prob(actions)
+        return actions, log_prob
+    return actions
+
+
+def eps_greedy_action_selection(
+    score: Tensor, mask: Tensor, store_log_probs: bool = False, eps: float = 0.1
+):
+    # Sample actions
+    masked_score = torch.masked_fill(score, mask, -torch.inf)
+    dist = Categorical(logits=masked_score)
+    actions = dist.sample()
+
+    # Sample random if p < eps
+    batch_size = score.shape[0]
+    indices = torch.arange(batch_size)
+    p = torch.rand((batch_size,))
+    is_random = p < eps
+    random_i = indices[is_random]
+    if random_i.numel() > 0:
+        random_dist = ~(mask[random_i])
+        actions[random_i] = torch.multinomial(random_dist.float(), 1).squeeze(-1)
+
     if store_log_probs:
         log_prob = dist.log_prob(actions)
         return actions, log_prob
@@ -242,6 +305,10 @@ def rollout(
     # Create sim indices
     sim_i = torch.arange(batch_size * num_rollouts)
 
+    # Sample index to avoid resampling cost
+    num_samples = samples.shape[-1]
+    sample_roll = random.randint(0, num_samples)
+
     while sim_i.numel() > 0:
         # -- 1. Compute mask
         rs = rollout_state[sim_i]
@@ -280,6 +347,8 @@ def rollout(
 
                 # Get samples
                 sampled_costs = samples[rs.batch_i, rs.current_node, n]
+                sampled_costs = torch.roll(sampled_costs, shifts=sample_roll, dims=-1)
+                sample_roll = (sample_roll + 1) % num_samples
                 # Get reward
                 r = rewards[rs.batch_i, n]
 
@@ -306,6 +375,8 @@ def rollout(
 
             # Get samples
             sampled_costs = samples[rs.batch_i, rs.current_node, g]
+            sampled_costs = torch.roll(sampled_costs, shifts=sample_roll, dims=-1)
+            sample_roll = (sample_roll + 1) % num_samples
             # Get reward
             r = rewards[rs.batch_i, g]
 
@@ -341,12 +412,177 @@ def reward_failure_scoring_fn(output: RolloutOutput, p_f: float):
     return scores
 
 
-def rank_output(output: RolloutOutput, scores: Tensor):
+def rank_output(output: RolloutOutput, scores: Tensor, topk: Optional[int] = None):
     batch_size, num_rollouts = output.shape
-    b_indices = torch.arange(batch_size).unsqueeze(-1).expand((-1, num_rollouts))
+    topk = topk if topk is not None else num_rollouts
+    topk_shape = (batch_size, topk)
 
-    sorted_i = torch.argsort(scores, descending=True, dim=-1)
-    sorted_output = output[b_indices, sorted_i]
-    sorted_score = scores[b_indices, sorted_i]
+    b_indices = torch.arange(batch_size).unsqueeze(-1).expand(topk_shape)
 
-    return sorted_output, sorted_score
+    ranked_score, ranked_i = torch.topk(scores, k=topk, dim=-1, sorted=True)
+    ranked_output = output[b_indices, ranked_i]
+
+    return ranked_output, ranked_score, ranked_i
+
+
+# -- Local Heuristic Optimization
+@tensorclass
+class ACOState:
+    pheremone: Tensor
+    best_path: Tensor
+    best_score: Tensor
+    tau_min: Tensor
+    tau_max: Tensor
+
+    @classmethod
+    def init(
+        cls,
+        heuristic: Tensor,
+    ):
+        batch_size, num_nodes, _ = heuristic.shape
+
+        def init_param(value: float):
+            return torch.full((batch_size,), value, dtype=torch.float32)
+
+        return cls(
+            pheremone=torch.ones_like(heuristic),
+            best_path=torch.zeros((batch_size, num_nodes + 1), dtype=torch.long),
+            best_score=init_param(-torch.inf),
+            tau_min=init_param(0),
+            tau_max=init_param(1),
+            batch_size=[batch_size],
+        )
+
+
+def pheremone_update(
+    state: ACOState,
+    graph: TorchGraph,
+    output: RolloutOutput,
+    scores: Tensor,
+    topk: Optional[int] = None,
+    rho: float = 0.1,
+    a: int = 10,
+):
+    batch_size, num_nodes = graph.size()
+    indices = torch.arange(batch_size)
+
+    topk_output, topk_score, topk_i = rank_output(output, scores, topk)
+
+    # Compute ranking weights
+    ranks = torch.arange(1, topk + 1)
+    weights = (topk - ranks + 1) / torch.sum(ranks)
+    weights = weights.unsqueeze(0).expand((batch_size, -1))
+
+    # Compute weighted scores
+    weighted_score = weights * topk_score
+
+    # Update best
+    best_output = topk_output[indices, 0]
+    best_score = topk_score[indices, 0]
+    update_best_path(state, best_output, best_score, rho=rho, a=a)
+
+    # Compute update pheremone matrix
+    update_matrix = compute_update_matrix(state, topk_output, weighted_score)
+
+    # Update pheremone
+    new_pheremone = (1 - rho) * (state.pheremone + update_matrix)
+
+    # Compute exploration update
+    new_pheremone = penalize_paths(new_pheremone, topk_output)
+
+    # Normalize pheremone
+    new_pheremone = new_pheremone / torch.sum(new_pheremone, dim=-1, keepdim=True)
+
+    # Clamp between tau_min and tau_max
+    # Element-wise unsqueeze
+    tau_min = state.tau_min.unsqueeze(-1).unsqueeze(-1)
+    tau_max = state.tau_max.unsqueeze(-1).unsqueeze(-1)
+    new_pheremone = torch.clamp(new_pheremone, min=tau_min, max=tau_max)
+
+    # Update state
+    state.pheremone = new_pheremone
+
+
+def compute_update_matrix(state: ACOState, output: RolloutOutput, score: Tensor):
+    batch_size, num_rollouts, max_length = output.path.nodes.shape
+
+    update_matrix = torch.zeros_like(state.pheremone)
+
+    # Batch and sim indices
+    b_indices = (
+        torch.arange(batch_size).unsqueeze(-1).expand((-1, num_rollouts)).flatten()
+    )
+    s_indices = torch.arange(batch_size * num_rollouts)
+
+    output = output.flatten()
+    score = score.flatten()
+
+    path_index = 1
+    while path_index < max_length:
+        current_node = output.path.nodes[s_indices, path_index]
+        is_continuing = current_node != -1
+        b_indices, s_indices = b_indices[is_continuing], s_indices[is_continuing]
+        if s_indices.numel() == 0:
+            break
+
+        current_node = current_node[is_continuing]
+        prev_node = output.path.nodes[s_indices, path_index - 1]
+        w = score[s_indices]
+
+        torch.index_put_(
+            update_matrix, [b_indices, prev_node, current_node], w, accumulate=True
+        )
+
+        path_index += 1
+
+    return update_matrix
+
+
+def penalize_paths(pheremone: Tensor, output: RolloutOutput, eps: float = 0.9):
+    batch_size, num_rollouts, max_length = output.path.nodes.shape
+
+    # Batch and sim indices
+    b_indices = (
+        torch.arange(batch_size).unsqueeze(-1).expand((-1, num_rollouts)).flatten()
+    )
+    s_indices = torch.arange(batch_size * num_rollouts)
+
+    output = output.flatten()
+
+    path_index = 1
+    while path_index < max_length:
+        current_node = output.path.nodes[s_indices, path_index]
+        is_continuing = current_node != -1
+        b_indices, s_indices = b_indices[is_continuing], s_indices[is_continuing]
+        if s_indices.numel() == 0:
+            break
+
+        current_node = current_node[is_continuing]
+        prev_node = output.path.nodes[s_indices, path_index - 1]
+
+        p = pheremone[b_indices, prev_node, current_node]
+        torch.index_put_(pheremone, [b_indices, prev_node, current_node], eps * p)
+
+        path_index += 1
+
+    return pheremone
+
+
+def update_best_path(
+    state: ACOState,
+    best_output: RolloutOutput,
+    best_score: Tensor,
+    rho: float,
+    a: int,
+):
+    indices = torch.arange(state.shape[0])
+
+    is_better = best_score > state.best_score
+    better_i = indices[is_better]
+    if better_i.numel() == 0:
+        return
+
+    state.best_score[better_i] = best_score[better_i]
+    state.best_path[better_i] = best_output.path.nodes[better_i]
+    state.tau_max[better_i] = rho * state.best_score[better_i]
+    state.tau_min[better_i] = state.tau_max[better_i] / a
