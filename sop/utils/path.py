@@ -5,6 +5,9 @@ import torch
 from torch import Tensor
 from tensordict import tensorclass
 
+from sop.utils.graph_torch import TorchGraph
+from sop.utils.sample import sample_costs
+
 UNVISITED = -1
 
 
@@ -56,3 +59,56 @@ class Path:
         tg = torch.load(path, weights_only=False)
 
         return tg
+
+
+# -- Utilities
+def evaluate_path(
+    path: Path, graph: TorchGraph, num_samples: int, kappa: float
+) -> torch.Tensor:
+    batch_size, max_length = path.size()
+    indices = torch.arange(batch_size)
+
+    budget = graph.extra["budget"].clone()
+    total_sampled_cost = torch.zeros((batch_size, num_samples))
+
+    path_index = 1
+    while path_index < max_length:
+        prev_node = path.nodes[indices, path_index - 1]
+        current_node = path.nodes[indices, path_index]
+        weight = graph.edges["distance"][indices, prev_node, current_node]
+
+        is_continuing = current_node != -1
+        indices = indices[is_continuing]
+        if indices.numel() == 0:
+            break
+
+        sampled_cost = sample_costs(weight[is_continuing], num_samples, kappa)
+        total_sampled_cost[indices] += sampled_cost
+        path_index += 1
+
+    residual_budget = budget.unsqueeze(-1) - total_sampled_cost
+
+    return (residual_budget < 0).sum(-1) / num_samples, total_sampled_cost.mean(-1)
+
+
+def path_to_heatmap(path: Path) -> torch.Tensor:
+    batch_size, max_length = path.size()
+    indices = torch.arange(batch_size)
+
+    num_nodes = max_length - 1
+    heatmap = torch.zeros((batch_size, num_nodes, num_nodes))
+
+    path_index = 1
+    while path_index < max_length:
+        prev_node = path.nodes[indices, path_index - 1]
+        current_node = path.nodes[indices, path_index]
+        heatmap[indices, prev_node, current_node] = 1
+
+        is_continuing = current_node != -1
+        indices = indices[is_continuing]
+        if indices.numel() == 0:
+            break
+
+        path_index += 1
+
+    return heatmap

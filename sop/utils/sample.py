@@ -8,7 +8,7 @@ def sample_exponential_distribution(rate: Tensor, num_samples: int) -> Tensor:
     x = -(1/rate)*ln(y)
     """
     sample_shape = (*rate.shape, num_samples)
-    y = torch.rand(sample_shape)
+    y = torch.rand(sample_shape) + 1e-9
     samples = -(1 / rate).unsqueeze(-1) * torch.log(y)
     return samples
 

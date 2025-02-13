@@ -9,3 +9,5 @@ torchvision
 # highs MILP solver
 highspy
 pulp
+# hyperparam optimization
+optuna

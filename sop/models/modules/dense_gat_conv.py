@@ -157,7 +157,7 @@ class DenseGATConv(torch.nn.Module):
         if mask is not None:
             out = out * mask.view(B, N, 1).to(x.dtype)
 
-        return out
+        return out, alpha
 
     def __repr__(self) -> str:
         return (

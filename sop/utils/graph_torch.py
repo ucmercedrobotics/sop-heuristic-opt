@@ -1,5 +1,6 @@
 from typing_extensions import Self
 import torch
+import torch.nn.functional as F
 from tensordict import tensorclass, TensorDict
 
 import rootutils
@@ -7,6 +8,7 @@ import rootutils
 root = rootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
 
 from sop.utils.sample import sample_costs
+from sop.utils.seed import set_seed, random_seed
 
 
 @tensorclass
@@ -105,6 +107,50 @@ def complete_adjacency_matrix(batch_size: int, num_nodes: int):
     adj.fill_diagonal_(0)
     adj = adj.unsqueeze(0).expand((batch_size, num_nodes, num_nodes))
     return adj
+
+
+# -- Neural Network
+def preprocess_graph(graph: TorchGraph):
+    reward = graph.nodes["reward"]
+    start_node = graph.extra["start_node"]
+    goal_node = graph.extra["goal_node"]
+    samples = graph.edges["samples"]
+
+    # node features: reward, is_start, is_goal
+    # edge features: normalized mean samples, is_start_edge, is_goal_edge
+    batch_size, num_nodes = graph.size()
+    indices = torch.arange(batch_size)
+    # Adjacency Matrix
+    adj = graph.edges["adj"]
+    # Node Features
+    is_start_node = torch.zeros((batch_size, num_nodes), dtype=torch.long)
+    is_goal_node = torch.zeros((batch_size, num_nodes), dtype=torch.long)
+    is_start_node[indices, start_node] = 1
+    is_goal_node[indices, goal_node] = 1
+    node_features = torch.cat(
+        [
+            reward.unsqueeze(-1),
+            F.one_hot(is_start_node, num_classes=2),
+            F.one_hot(is_goal_node, num_classes=2),
+        ],
+        dim=-1,
+    )
+    # Edge Features
+    sample_mean = samples.mean(-1)
+    is_start_edge = torch.zeros((batch_size, num_nodes, num_nodes), dtype=torch.long)
+    is_goal_edge = torch.zeros((batch_size, num_nodes, num_nodes), dtype=torch.long)
+    is_start_edge[indices, start_node] = 1
+    is_goal_edge[indices, :, goal_node] = 1
+    edge_features = torch.cat(
+        [
+            sample_mean.unsqueeze(-1),
+            F.one_hot(is_start_edge, num_classes=2),
+            F.one_hot(is_goal_edge, num_classes=2),
+        ],
+        dim=-1,
+    )
+
+    return node_features, edge_features, adj
 
 
 if __name__ == "__main__":

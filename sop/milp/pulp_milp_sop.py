@@ -1,3 +1,4 @@
+from typing import Optional
 import pulp
 import torch
 from torch import Tensor
@@ -150,7 +151,8 @@ def extract_solution(prob):
 
     edge_dict = {}
     for v in prob.variables():
-        if v.varValue > 0:
+        # if v.varValue > 0: # There are inaccuracies where the varValue is a very small number but still > 0
+        if v.varValue > 0.1:
             if v.name.startswith("pi"):
                 a, b = [int(x) for x in re.search(pattern, v.name).groups()]
                 edge_dict[a] = b
@@ -181,10 +183,10 @@ def edge_list_to_path(
 
 def sop_milp_solver(
     graph: TorchGraph,
-    time_limit: int = 180,
+    time_limit: Optional[int] = 180,
     num_samples: int = 100,
     M: int = 1000,
-    alpha_prime: float = 0.1,
+    alpha_prime: float = 0.075,
 ) -> Path:
     R = graph.nodes["reward"]
     C = graph.edges["distance"]
@@ -197,7 +199,8 @@ def sop_milp_solver(
     prob = create_pulp_instance(R, C, S, b, s, g, num_samples, M, alpha_prime)
 
     solver = pulp.getSolver("HiGHS")
-    solver.timeLimit = time_limit
+    if time_limit is not None:
+        solver.timeLimit = time_limit
 
     print("Solving instance...")
     result = prob.solve(solver)
