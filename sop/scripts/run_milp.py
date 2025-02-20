@@ -17,7 +17,7 @@ from sop.utils.visualization import plot_solutions, plot_heuristics
 from sop.utils.path import evaluate_path, path_to_heatmap
 from sop.utils.seed import random_seed, set_seed
 
-from sop.milp.pulp_milp_sop import sop_milp_solver
+from sop.inference.milp import sop_milp_solver
 from sop.mcts.aco import (
     ACOParams,
     sop_aco_solver,

@@ -4,7 +4,7 @@ import torch
 from torch import Tensor
 import re
 
-from sop.utils.graph_torch import TorchGraph
+from sop.utils.graph import TorchGraph
 from sop.utils.path import Path
 
 """

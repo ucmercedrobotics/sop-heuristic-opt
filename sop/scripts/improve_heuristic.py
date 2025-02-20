@@ -17,7 +17,7 @@ from sop.mcts.sop2 import (
     random_heuristic,
     mcts_sopcc_heuristic,
 )
-from sop.milp.pulp_milp_sop import sop_milp_solver
+from sop.inference.milp import sop_milp_solver
 from sop.utils.visualization import plot_solutions, plot_heuristics
 from sop.utils.path import Path, evaluate_path, path_to_heatmap
 from sop.utils.seed import set_seed, random_seed

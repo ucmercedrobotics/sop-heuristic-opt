@@ -16,7 +16,7 @@ from sop.utils.graph_torch import (
     generate_sop_graphs,
 )
 from sop.utils.sample import sample_costs
-from sop.milp.pulp_milp_sop import sop_milp_solver
+from sop.inference.milp import sop_milp_solver
 from sop.utils.visualization import plot_solutions
 from sop.utils.path import Path
 from sop.utils.seed import set_seed, random_seed

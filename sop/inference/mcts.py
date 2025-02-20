@@ -1,18 +1,13 @@
-from typing import Tuple
-import time
+from typing import Tuple, Callable
 
 import torch
 from torch import Tensor
 from tensordict import tensorclass
 
 from sop.utils.path import Path
-from sop.utils.graph_torch import TorchGraph
+from sop.utils.graph import TorchGraph
 from sop.utils.sample import sample_costs
-
-
-# generates random probability of selecting particular edge, as in random rollout
-def random_heuristic(batch_size: int, num_nodes: int):
-    return torch.rand((batch_size, num_nodes, num_nodes)).softmax(-1)
+from sop.inference.rollout import RolloutOutput, rollout, categorical_action_selection
 
 
 # generates average utility (reward/average cost) for edges, as in MCTSSOPCC
@@ -26,53 +21,64 @@ def sop_mcts_solver(
     heuristic: Tensor,
     num_simulations: int,
     num_rollouts: int,
-    z: float,
     p_f: float,
-    epsilon: float,
+    z: float,
     kappa: float,
+    action_selection_fn: Callable = categorical_action_selection,
 ) -> Tuple[Path, Tensor]:
-    batch_size, num_nodes = graph.size()
+    start_node = graph.extra["start_node"]
+    budget = graph.extra["budget"]
+    goal_node = graph.extra["goal_node"]
+    rewards = graph.nodes["reward"]
+    weights = graph.edges["distance"]
 
-    current_node = graph.extra["start_node"].clone()
-    current_budget = graph.extra["budget"].clone()
-    goal_node = graph.extra["goal_node"].clone()
+    batch_size, num_nodes = graph.size()
+    indices = torch.arange(batch_size)
 
     # Loop State
-    indices = torch.arange(batch_size)
+    current_node = start_node.clone()
+    current_budget = budget.clone()
+
+    # Initialize Path
     path = Path.empty(batch_size, num_nodes)
     path.append(indices, current_node)
+    # Mask goal node
+    path.mask[indices, goal_node] = 1
 
     while indices.numel() > 0:
         next_node = MCTS_SOPCC(
-            graph[indices],
-            heuristic[indices],
-            current_node[indices],
-            current_budget[indices],
-            path[indices],
-            num_simulations,
-            num_rollouts,
-            z,
-            p_f,
-            epsilon,
-            kappa,
+            heuristic=heuristic[indices],
+            graph=graph[indices],
+            current_node=current_node[indices],
+            current_budget=current_budget[indices],
+            current_path=path[indices],
+            num_simulations=num_simulations,
+            num_rollouts=num_rollouts,
+            z=z,
+            p_f=p_f,
+            kappa=kappa,
+            action_selection_fn=action_selection_fn,
         )
 
-        # Get values
-        r = graph.nodes["reward"][indices, next_node]
-        w = graph.edges["distance"][indices, current_node[indices], next_node]
+        # Get next values
+        r = rewards[indices, next_node]
+        w = weights[indices, current_node[indices], next_node]
 
         # Update budget
-        sampled_cost = sample_costs(w, num_samples=1, kappa=0.5).squeeze()
-        current_budget[indices] -= sampled_cost
+        sampled_cost = sample_costs(w, num_samples=1, kappa=0.5)
+        current_budget[indices] -= sampled_cost.squeeze(-1)
 
         # Add to path
-        path.append(indices, next_node, reward=r)
+        path.append(indices, next_node, r)
 
-        # Update state
+        # Check if done
         is_not_goal = next_node != goal_node[indices]
         has_budget = current_budget[indices] > 0
         is_continuing = torch.logical_and(is_not_goal, has_budget)
+
+        # Update loop state
         indices = indices[is_continuing]
+        current_node[indices] = next_node[is_continuing]
 
     # Check if run was success
     is_success = current_budget > 0
@@ -81,8 +87,8 @@ def sop_mcts_solver(
 
 
 def MCTS_SOPCC(
-    graph: TorchGraph,
     heuristic: Tensor,
+    graph: TorchGraph,
     current_node: Tensor,
     current_budget: Tensor,
     current_path: Path,
@@ -90,163 +96,32 @@ def MCTS_SOPCC(
     num_rollouts: int,
     z: float,
     p_f: float,
-    epsilon: float,
-    kappa: float,
+    action_selection_fn: Callable,
 ) -> Tuple[Tensor, Tensor]:
     tree = Tree.instantiate_from_root(current_node, graph, num_simulations)
     for k in range(num_simulations):
-        # s = time.time()
         parent_tree_node, new_graph_node, tree_path, is_expanded, is_finished = select(
             tree, graph, heuristic, current_path, z, score_fn=compute_uctf
         )
-        # print(f"Select: {time.time() - s}")
-        # s = time.time()
-        Q, F = aco_rollout(
-            graph,
+        # TODO: Hook up rollout with MCTS
+        output = rollout(
             heuristic,
-            tree_path,
+            graph,
             new_graph_node,
             current_budget,
+            tree_path,
             num_rollouts,
             p_f,
-            kappa,
-            epsilon,
+            action_selection_fn,
         )
-        # print(f"Rollout: {time.time() - s}")
-        # s = time.time()
+        Q, F = ...
         new_tree_node = expand(
             tree, parent_tree_node, new_graph_node, Q, F, is_expanded
         )
-        # print(f"Expand: {time.time() - s}")
-        # s = time.time()
         backup(tree, graph, new_tree_node, p_f)
-        # print(f"Backup: {time.time() - s}")
-        # s = time.time()
         backupN(tree, new_tree_node)
-        # print(f"BackupN: {time.time() - s}")
 
     return select_action(tree, graph, current_path, p_f)
-
-
-def sop_mcts_aco_solver(
-    graph: TorchGraph,
-    heuristic: Tensor,
-    num_simulations: int,
-    num_rollouts: int,
-    z: float,
-    p_f: float,
-    epsilon: float,
-    kappa: float,
-) -> Tuple[Path, Tensor]:
-    batch_size, num_nodes = graph.size()
-
-    current_node = graph.extra["start_node"].clone()
-    current_budget = graph.extra["budget"].clone()
-    goal_node = graph.extra["goal_node"].clone()
-
-    # TODO: Generalize this; I'm just testing right now
-    # Clone heuristic
-    heuristic = heuristic.clone()
-    # Initialize pheremone
-    pheremone = torch.ones_like(heuristic) * 0.1
-
-    # Loop State
-    indices = torch.arange(batch_size)
-    path = Path.empty(batch_size, num_nodes)
-    path.append(indices, current_node)
-    path.mask[indices, goal_node] = 1
-
-    while indices.numel() > 0:
-        print(current_node)
-        next_node, new_pheremone = MCTS_ACO(
-            graph[indices],
-            heuristic[indices],
-            pheremone[indices],
-            current_node[indices],
-            current_budget[indices],
-            path[indices],
-            num_simulations,
-            num_rollouts,
-            z=z,
-            p_f=p_f,
-            epsilon=epsilon,
-            kappa=kappa,
-        )
-        pheremone[indices] = new_pheremone
-
-        # Get values
-        r = graph.nodes["reward"][indices, next_node]
-        w = graph.edges["distance"][indices, current_node[indices], next_node]
-
-        # Update budget
-        sampled_cost = sample_costs(w, num_samples=1, kappa=0.5).squeeze()
-        current_budget[indices] -= sampled_cost
-
-        # Add to path
-        path.append(indices, next_node, reward=r)
-
-        # Update state
-        is_not_goal = next_node != goal_node[indices]
-        has_budget = current_budget[indices] > 0
-        is_continuing = torch.logical_and(is_not_goal, has_budget)
-        indices = indices[is_continuing]
-        current_node[indices] = next_node[is_continuing]
-
-    # Check if run was success
-    is_success = current_budget >= 0
-
-    return path, is_success, pheremone
-
-
-def MCTS_ACO(
-    graph: TorchGraph,
-    heuristic: Tensor,
-    pheremone: Tensor,
-    current_node: Tensor,
-    current_budget: Tensor,
-    current_path: Path,
-    num_simulations: int,
-    num_rollouts: int,
-    z: float,
-    epsilon: float,
-    p_f: float,
-    kappa: float,
-) -> Tuple[Tensor, Tensor]:
-    batch_size, _ = graph.size()
-    tree = Tree.instantiate_from_root(current_node, graph, num_simulations)
-
-    for k in range(num_simulations):
-        # -- Select a node to rollout
-        parent_tree_node, new_graph_node, tree_path, is_expanded, is_finished = select(
-            tree, graph, current_path, z=z, score_fn=compute_uctf
-        )
-
-        # -- Rollout
-        Q, F = aco_rollout(
-            graph,
-            heuristic,
-            pheremone,
-            tree_path,
-            new_graph_node,
-            current_budget,
-            num_rollouts,
-            p_f=p_f,
-            kappa=kappa,
-            epsilon=epsilon,
-        )
-
-        # -- Expand Node
-        new_tree_node = expand(
-            tree, parent_tree_node, new_graph_node, Q, F, is_expanded
-        )
-
-        # -- Backup
-        backup(tree, graph, new_tree_node, p_f)
-
-        # -- BackupN
-        backupN(tree, new_tree_node)
-
-    return select_action(tree, graph, current_path, p_f), pheremone
 
 
 # -- CONSTANTS
@@ -607,235 +482,3 @@ def select_action(
         action[is_invalid] = graph.extra["goal_node"][invalid_i].clone()
 
     return action
-
-
-# -- ROLLOUT
-def sample_traverse_cost(
-    path: Path, graph: TorchGraph, num_samples: int, kappa: float = 0.5
-):
-    batch_size, max_length = path.size()
-    indices = torch.arange(batch_size)
-
-    total_sampled_cost = torch.zeros((batch_size, num_samples))
-
-    path_index = 1
-    while path_index < max_length:
-        prev_node = path.nodes[indices, path_index - 1]
-        current_node = path.nodes[indices, path_index]
-        weight = graph.edges["distance"][indices, prev_node, current_node]
-
-        is_continuing = current_node != -1
-        indices = indices[is_continuing]
-        if indices.numel() == 0:
-            break
-
-        sampled_cost = sample_costs(weight[is_continuing], num_samples, kappa)
-        total_sampled_cost[indices] += sampled_cost
-
-        path_index += 1
-
-    return total_sampled_cost
-
-
-def compute_failure_prob(sample_c_n: Tensor, sample_n_g: Tensor, B: Tensor) -> Tensor:
-    total_sample_cost = sample_c_n + sample_n_g
-    return (
-        torch.sum(total_sample_cost > B.unsqueeze(-1), dim=-1)
-        / total_sample_cost.shape[-1]
-    )
-
-
-def aco_action_selection(
-    pheremone: Tensor, heuristic: Tensor, mask: Tensor, alpha: float, beta: float
-):
-    score = (pheremone**alpha) * (heuristic**beta)
-    return torch.multinomial(torch.masked_fill(score, mask, 0), num_samples=1).squeeze()
-
-
-def ir_action_selection(
-    pheremone: Tensor, heuristic: Tensor, mask: Tensor, alpha: float, beta: float
-):
-    score = (pheremone**alpha) * (heuristic**beta)
-    r = torch.rand_like(score)
-    return torch.argmax(torch.masked_fill(score * r, mask, 0), dim=-1).squeeze()
-
-
-def ada_ir_action_selection(
-    pheremone: Tensor,
-    heuristic: Tensor,
-    mask: Tensor,
-    alpha: float,
-    beta: float,
-    lr: float = 1,
-):
-    score = (pheremone**alpha) * (heuristic**beta)
-    r = torch.rand_like(score) ** lr
-    return torch.argmax(torch.masked_fill(score * r, mask, 0), dim=-1).squeeze()
-
-
-def aco_rollout(
-    graph: TorchGraph,
-    heuristic: Tensor,
-    pheremone: Tensor,
-    tree_path: Tensor,
-    leaf_graph_node: Tensor,
-    budget: Tensor,
-    num_rollouts: int,
-    p_f: float,
-    kappa: float = 0.5,
-    epsilon: float = 0.1,
-) -> Tuple[Tensor, Tensor, Path]:
-    # Define shapes
-    batch_size, num_nodes = graph.size()
-    sim_shape = (batch_size, num_rollouts)
-    flatten_shape = (batch_size * num_rollouts,)
-
-    # Preload data
-    samples = graph.edges["samples"]
-    weights = graph.edges["distance"]
-    goal_node = graph.extra["goal_node"]
-    rewards = graph.nodes["reward"]
-
-    # Create indices
-    indices = torch.arange(batch_size)
-    # batch_indices will query batch-level resources, like graph rewards and edge weights
-    batch_indices = (
-        torch.arange(batch_size).unsqueeze(-1).expand(sim_shape).flatten()
-    )  # [B*S]
-    # sim_indices will query simulation level resources, like simulated_budget and masks
-    sim_indices = torch.arange(batch_size * num_rollouts)  # [B*S]
-
-    # Local Failure mask
-    failure_mask = torch.zeros((batch_size * num_rollouts, num_nodes))
-
-    # Sample traverse cost
-    ts = sample_traverse_cost(tree_path, graph, num_rollouts, kappa)
-    sampled_budgets = budget.unsqueeze(-1) - ts  # [B, S]
-    simulated_budgets = sampled_budgets.flatten()
-    starting_budgets = sampled_budgets.clone()
-
-    # Loop State
-    current_nodes = (
-        leaf_graph_node.unsqueeze(-1).broadcast_to(sim_shape).flatten().clone()
-    )  # [B*S]
-
-    # Create Paths and add mask for previous nodes
-    sim_paths = Path.empty(batch_size, num_nodes)
-    sim_paths.mask = tree_path.mask.clone()
-    leaf_r = rewards[indices, leaf_graph_node]
-    sim_paths.append(indices, leaf_graph_node, leaf_r)
-
-    # Expand and flatten paths to size [B*S]
-    sim_paths = sim_paths.unsqueeze(-1).expand(sim_shape).flatten().clone()
-
-    while sim_indices.numel() > 0:
-        # 0. Define action buffer
-        new_nodes = torch.empty(flatten_shape, dtype=torch.long)
-
-        # 1. Action selection
-        # 1a. Compute valid node mask
-        mask = torch.logical_or(sim_paths.mask[sim_indices], failure_mask[sim_indices])
-        is_invalid = mask.sum(-1) == num_nodes
-        is_valid = ~is_invalid
-
-        # 1b. If mask has no valid nodes, go to goal
-        b_invalid_i, s_invalid_i = batch_indices[is_invalid], sim_indices[is_invalid]
-        if s_invalid_i.numel() > 0:
-            new_nodes[s_invalid_i] = goal_node[b_invalid_i].clone()
-
-        # 1c. Action Selection
-        b_valid_i, s_valid_i = batch_indices[is_valid], sim_indices[is_valid]
-        mask = mask[is_valid]
-
-        p = torch.rand(s_valid_i.shape)
-        choose_random = p < epsilon
-        choose_greedy = ~choose_random
-
-        # 1d: if p < p_r, select random
-        s_rand_i = s_valid_i[choose_random]
-        if s_rand_i.numel() > 0:
-            m = ~mask[choose_random]
-            action = torch.multinomial(m.float(), num_samples=1).squeeze()
-            new_nodes[s_rand_i] = action
-
-        # 1e: else p >= p_r select greedy
-        b_greedy_i, s_greedy_i = (
-            b_valid_i[choose_greedy],
-            s_valid_i[choose_greedy],
-        )
-        if s_greedy_i.numel() > 0:
-            m = mask[choose_greedy]
-            c = current_nodes[s_greedy_i]
-            scores = heuristic[b_greedy_i, c]
-            action = torch.argmax(torch.masked_fill(scores, m, 0), dim=-1)
-            new_nodes[s_greedy_i] = action
-
-        # 2. Determine if action is goal
-        b_cont_i, s_cont_i = b_valid_i, s_valid_i
-
-        # 3. If not goal, compute failure probability
-        if s_cont_i.numel() > 0:
-            # 3a. Compute failure probability
-            c = current_nodes[s_cont_i]
-            n = new_nodes[s_cont_i]
-            g = goal_node[b_cont_i]
-            b = simulated_budgets[s_cont_i]
-            sample_c_n = samples[b_cont_i, c, n]
-            sample_n_g = samples[b_cont_i, n, g]
-            failure_prob = compute_failure_prob(sample_c_n, sample_n_g, b)
-
-            # Determine whether node failed or succeeded
-            below_failure = failure_prob <= p_f
-            b_suc_i, s_suc_i = b_cont_i[below_failure], s_cont_i[below_failure]
-            # 3b. if Pr[...] <= p_f, add to path
-            if s_suc_i.numel() > 0:
-                c = current_nodes[s_suc_i]
-                n = new_nodes[s_suc_i]
-                w = weights[b_suc_i, c, n]
-
-                # Sample and update budget
-                sampled_cost = sample_costs(w, num_samples=1, kappa=kappa)
-                simulated_budgets[s_suc_i] -= sampled_cost.squeeze(-1)
-
-                # Add to path
-                r = rewards[b_suc_i, n]
-                sim_paths.append(s_suc_i, n, r)
-
-                # Change current node
-                current_nodes[s_suc_i] = n
-
-                # Clear failure mask
-                failure_mask[s_suc_i] = 0
-
-            # 3c. Update local failure mask so we don't choose this again
-            s_fail_i = s_cont_i[~below_failure]
-            if s_fail_i.numel() > 0:
-                n = new_nodes[s_fail_i]
-                failure_mask[s_fail_i, n] = 1
-
-        # 4: else is goal, add to path and return
-        b_goal_i, s_goal_i = b_invalid_i, s_invalid_i
-        if s_goal_i.numel() > 0:
-            c = current_nodes[s_goal_i]
-            n = new_nodes[s_goal_i]
-            w = weights[b_goal_i, c, n]
-
-            # Sample and update budget
-            sampled_cost = sample_costs(w, num_samples=1, kappa=kappa)
-            simulated_budgets[s_goal_i] -= sampled_cost.squeeze(-1)
-
-            # Add to path
-            r = rewards[b_goal_i, n]
-            sim_paths.append(s_goal_i, n, r)
-
-        # 5. Update Loop State
-        batch_indices, sim_indices = b_valid_i, s_valid_i
-
-    sim_paths = sim_paths.reshape(sim_shape)
-    sim_cost = (starting_budgets - simulated_budgets).reshape(sim_shape)
-    sim_residual = simulated_budgets.reshape(sim_shape)
-
-    Q = sim_paths.reward.sum(-1).sum(-1) / num_rollouts
-    F = (sim_residual < 0).sum(-1) / num_rollouts
-
-    return Q, F
