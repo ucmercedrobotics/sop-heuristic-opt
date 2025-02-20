@@ -1,76 +1,29 @@
-from typing import Optional
-from dataclasses import dataclass
+# Types
+from typing import Optional, Tuple
+from matplotlib.axes import Axes
+from matplotlib.figure import Figure
+from torch import Tensor
+
+import math
 import matplotlib.pyplot as plt
 import numpy as np
-import graphviz
 import torch
 
-from sop.utils.graph_torch import TorchGraph
+from sop.utils.graph import TorchGraph
 from sop.utils.path import Path
-from sop.mcts.core import Tree
 
 
-# -- Visualization
+# -- Utilities
+def subplots(rows: int, cols: int) -> Tuple[Figure, Axes]:
+    fig, axs = plt.subplots(rows, cols)
+    if type(axs) is not list:
+        axs = [axs]
+    for ax in axs:
+        ax.set_axis_off()
+    return fig, axs
 
 
-def plot_solutions(
-    graph: TorchGraph,
-    paths: list[Path],
-    titles: list[str],
-    out_path: Optional[str] = None,
-    rows: int = 1,
-    cols: int = 2,
-):
-    assert len(paths) == len(titles)
-
-    fig, axes = plt.subplots(rows, cols, figsize=(12, 8))
-    if len(paths) == 1:
-        axes = [axes]
-
-    for i, (path, title) in enumerate(zip(paths, titles)):
-        ax = axes[i]
-        starting_node = path.nodes[0]
-        goal_node = path.nodes[path.length - 1]
-        pos = graph.nodes["position"]
-
-        # -- Draw nodes
-        colors = ["b"] * pos.shape[0]
-        colors[starting_node] = "r"
-        colors[goal_node] = "g"
-
-        alpha = torch.clamp((1.0 * graph.nodes["reward"]), min=0, max=1).tolist()
-        alpha[starting_node] = 0.5
-        alpha[goal_node] = 0.5
-
-        ax.scatter(x=pos[:, 0], y=pos[:, 1], c=colors, alpha=alpha)
-        # Label each point
-        for i in range(len(pos)):
-            ax.annotate(
-                i, pos[i], textcoords="offset points", xytext=(5, 5), ha="right"
-            )
-
-        # -- Label
-
-        # -- Draw edges
-        path_index = 1
-        while path_index < path.length:
-            prev_node = path.nodes[path_index - 1]
-            current_node = path.nodes[path_index]
-            ax.annotate(
-                "",
-                xy=pos[current_node],
-                xytext=pos[prev_node],
-                arrowprops=dict(arrowstyle="->"),
-            )
-            path_index += 1
-
-        ax.set_title(title)
-        ax.grid(True)
-
-    # Hide unused subplots
-    for i in range(len(paths), len(axes)):
-        fig.delaxes(axes[i])  # Removes empty subplot spaces
-
+def show(out_path: Optional[str]):
     plt.tight_layout()
     if out_path is not None:
         plt.savefig(out_path)
@@ -78,16 +31,128 @@ def plot_solutions(
         plt.show()
 
 
-def heatmap(data, ax, cbar_kw=None, cbarlabel="", xstep=5, ystep=1, **kwargs):
-    """
-    Create a heatmap from a 2x2 matrix.
-    Taken from: https://matplotlib.org/stable/gallery/images_contours_and_fields/image_annotated_heatmap.html
-    """
+# -- Multi Plots
+def plot_solutions(
+    graph: TorchGraph,
+    paths: list[Path],
+    titles: list[str],
+    out_path: Optional[str] = None,
+    cols: int = 2,
+):
+    assert len(paths) == len(titles)
+    rows = math.ceil(len(titles) / cols)
+    fig, axs = subplots(rows, cols)
+
+    for i, (path, title) in enumerate(zip(paths, titles)):
+        ax = axs[i]
+        ax.set_axis_on()
+        plot_graph(graph, ax)
+        plot_path(graph, path, ax)
+        ax.set_title(title)
+
+    show(out_path)
+
+
+def plot_heuristics(
+    heuristics: list[Tensor],
+    titles: list[str],
+    out_path: Optional[str] = None,
+    cols: int = 2,
+):
+    assert len(heuristics) == len(titles)
+    rows = math.ceil(len(titles) / cols)
+    fig, axs = subplots(rows, cols)
+
+    for i, (heuristic, title) in enumerate(zip(heuristics, titles)):
+        ax = axs[i]
+        ax.set_axis_on()
+        plot_heatmap(heuristic, ax, cmap="YlGn", cbarlabel="score")
+        ax.set_title(title)
+
+    show(out_path)
+
+
+def plot_statistics(
+    statistics: list[dict[str, list[float]]],
+    titles: list[str],
+    out_path: Optional[str] = None,
+    cols: int = 2,
+    data_labels: list[str] = ["Min", "Avg", "Max", "p_f"],
+):
+    assert len(statistics) == len(titles)
+    rows = math.ceil(len(titles) / cols)
+    fig, axs = subplots(rows, cols)
+
+    # data = {
+    #     "Walk": (4.21, 9.10, 10.50, 0.11),
+    #     "Vanilla": (5.13, 10.13, 12.25, 0.1),
+    #     "ACO": (5.32, 10.82, 13.19, 0.0),
+    # }
+
+    for i, (stat, title) in enumerate(zip(statistics, titles)):
+        ax = axs[i]
+        ax.set_axis_on()
+        plot_bars(data_labels, stat, ax)
+        ax.set_ylabel("Reward")
+        ax.set_title(title)
+
+    show(out_path)
+
+
+# -- Plot Items
+
+
+def plot_graph(
+    graph: TorchGraph,
+    ax: Axes,
+):
+    start_node = graph.extra["start_node"]
+    goal_node = graph.extra["goal_node"]
+    pos = graph.nodes["position"]
+    reward = graph.nodes["reward"]
+
+    # Define colors
+    colors = ["b"] * pos.shape[0]
+    colors[start_node] = "r"
+    colors[goal_node] = "g"
+    # Define alpha based on reward
+    alpha = torch.clamp((1.0 * reward), min=0, max=1).tolist()
+    alpha[start_node] = 0.5
+    alpha[goal_node] = 0.5
+    # Plot
+    ax.scatter(x=pos[:, 0], y=pos[:, 1], c=colors, alpha=alpha)
+    # Label each point w/ index
+    for i in range(len(pos)):
+        ax.annotate(i, pos[i], textcoords="offset points", xytext=(5, 5), ha="right")
+
+    ax.grid(True)
+
+
+def plot_path(graph: TorchGraph, path: Path, ax: Axes):
+    pos = graph.nodes["position"]
+
+    path_index = 1
+    while path_index < path.length:
+        prev_node = path.nodes[path_index - 1]
+        current_node = path.nodes[path_index]
+        ax.annotate(
+            "",
+            xy=pos[current_node],
+            xytext=pos[prev_node],
+            arrowprops=dict(arrowstyle="->"),
+        )
+        path_index += 1
+
+
+def plot_heatmap(
+    heatmap: Tensor, ax: Axes, cbar_kw=None, cbarlabel="", xstep=5, ystep=1, **kwargs
+):
+    """Display a heatmap from a 2d matrix."""
     if cbar_kw is None:
         cbar_kw = {}
 
     # Plot the heatmap
-    im = ax.imshow(data, **kwargs)
+    im = ax.imshow(heatmap, **kwargs)
 
     # Create colorbar
     cbar = ax.figure.colorbar(im, ax=ax, **cbar_kw)
@@ -97,125 +162,29 @@ def heatmap(data, ax, cbar_kw=None, cbarlabel="", xstep=5, ystep=1, **kwargs):
     ax.spines[:].set_visible(False)
 
     # Show all ticks and label them with the respective list entries
-    x_labels = [i for i in range(0, data.shape[1], xstep)]
-    y_labels = [i for i in range(0, data.shape[0], ystep)]
+    x_labels = [i for i in range(0, heatmap.shape[1], xstep)]
+    y_labels = [i for i in range(0, heatmap.shape[0], ystep)]
 
-    ax.set_xticks(range(0, data.shape[1], 5), labels=x_labels)
-    ax.set_yticks(range(data.shape[0]), labels=y_labels)
+    ax.set_xticks(range(0, heatmap.shape[1], 5), labels=x_labels)
+    ax.set_yticks(range(heatmap.shape[0]), labels=y_labels)
     ax.grid(which="minor", color="w", linestyle="-", linewidth=3)
 
     return im
 
 
-def plot_heuristics(
-    heuristics: list[torch.Tensor],
-    titles: list[str],
-    out_path: Optional[str] = None,
-    rows: int = 1,
-    cols: int = 2,
+def plot_bars(
+    data_labels: list[str], data: dict[str, list[float]], ax: Axes, width: float = 0.25
 ):
-    assert len(heuristics) == len(titles)
+    x = np.arange(len(data_labels))  # the label locations
+    multiplier = 0
 
-    fig, axes = plt.subplots(rows, cols, figsize=(12, 8))
-    if len(heuristics) == 1:
-        axes = [axes]
+    fig, ax = plt.subplots(layout="constrained")
 
-    for i, (H, title) in enumerate(zip(heuristics, titles)):
-        ax = axes[i]
-        im = heatmap(H, ax=ax, cmap="YlGn", cbarlabel="score")
-        ax.set_title(title)
+    for attribute, measurement in data.items():
+        offset = width * multiplier
+        rects = ax.bar(x + offset, measurement, width, label=attribute)
+        ax.bar_label(rects, padding=3)
+        multiplier += 1
 
-    # Hide unused subplots
-    for i in range(len(heuristics), len(axes)):
-        fig.delaxes(axes[i])  # Removes empty subplot spaces
-
-    plt.tight_layout()
-    if out_path is not None:
-        plt.savefig(out_path)
-    else:
-        plt.show()
-
-
-def plot_tree(tree: Tree):
-    dot = graphviz.Digraph("Tree", comment="MCTS Tree")
-
-    def add_node(dot: graphviz.Digraph, tree: Tree, node: int):
-        node_mapping = tree.node_mapping[node]
-        visit_count = tree.visit_count[node]
-        V = tree.node_value[node]
-        s = f"{node_mapping}\nv: {visit_count}\nV: {V:.4f}"
-        dot.node(f"{node}", s)
-
-        children = tree.children_index[node]
-        for child in children:
-            if child == -1:
-                continue
-            add_node(dot, tree, child)
-            child_mapping = tree.node_mapping[child]
-            Q = tree.children_Q_values[node, child_mapping]
-            dot.edge(f"{node}", f"{child}", label=f"{Q:.4f}")
-
-    add_node(dot, tree, 0)
-
-    return dot
-
-
-# -- Stats
-@dataclass
-class Stats:
-    paths: Path
-    min_reward: float
-    avg_reward: float
-    max_reward: float
-    failure_prob: float
-
-
-def plot_statistics(
-    stats: list[Stats],
-    titles: list[str],
-    out_path: Optional[str] = None,
-    rows: int = 2,
-    cols: int = 2,
-):
-    assert len(stats) == len(titles)
-
-    categories = ["Min", "Max", "Avg", "p_f"]
-    y_labels = ["Reward", "Reward", "Reward", "Probability"]
-    data = {
-        "Min": [s.min_reward for s in stats],
-        "Max": [s.max_reward for s in stats],
-        "Avg": [s.avg_reward for s in stats],
-        "p_f": [s.failure_prob for s in stats],
-    }
-
-    fig, axes = plt.subplots(rows, cols, figsize=(12, 8))
-    if rows * cols == 1:
-        axes = [axes]
-    else:
-        axes = axes.flatten()
-
-    for i, category in enumerate(data.keys()):
-        ax = axes[i]
-        x = np.arange(len(titles))
-        width = 0.5
-        for j, title in enumerate(categories):
-            ax.bar(x[j], data[category][i], width, label=title)
-
-        ax.set_title(category)
-        ax.set_xticks(x)
-        ax.set_xticklabels(titles)
-        ax.set_ylabel(y_labels[i])
-
-    # Add legend only once
-    # handles = [plt.Rectangle((0, 0), 1, 1) for i in range(len(titles))]
-    # fig.legend(handles, titles, title="Method", loc="upper right")
-
-    # Hide unused subplots
-    for i in range(len(titles), len(axes)):
-        fig.delaxes(axes[i])  # Removes empty subplot spaces
-
-    plt.tight_layout()
-    if out_path is not None:
-        plt.savefig(out_path)
-    else:
-        plt.show()
+    ax.set_xticks(x + width, data_labels)
+    ax.legend(loc="upper left", ncols=3)
