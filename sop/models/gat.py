@@ -2,11 +2,8 @@ from typing import Optional
 import torch
 from torch import Tensor
 import torch.nn as nn
-import torch_geometric.nn as gnn
 from torch_geometric.nn.dense.linear import Linear
 import torch.nn.functional as F
-from sop.utils.graph_torch import TorchGraph
-from sop.utils.replay_buffer import TrainData
 from sop.models.modules import DenseGATConv, DenseGATv2Conv
 
 
@@ -138,33 +135,3 @@ class GATv2(nn.Module):
         x = self.value_lin(x).squeeze()
 
         return x
-
-
-class HeuristicPolicy(nn.Module):
-    def __init__(
-        self,
-        in_channels: int,
-        hidden_channels: int,
-        out_channels: int,
-        heads: int,
-        edge_dim: Optional[int] = None,
-        edge_out_dim: Optional[int] = None,
-    ):
-        super().__init__()
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-
-        self.conv1 = DenseGATConv(
-            in_channels, hidden_channels, heads, edge_dim, edge_out_dim
-        )
-
-    def forward(
-        self,
-        node_features: Tensor,
-        adj: Tensor,
-        edge_features: Optional[Tensor] = None,
-        mask: Optional[Tensor] = None,
-    ):
-        B, N, _ = node_features.shape
-        x, w = F.silu(self.conv1(node_features, adj, edge_features, mask))
-        return w

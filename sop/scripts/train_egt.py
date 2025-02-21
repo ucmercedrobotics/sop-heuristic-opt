@@ -1,6 +1,6 @@
 from typing import Optional, Callable
+from functools import partial
 from dataclasses import dataclass
-import time
 import os
 from tqdm import tqdm
 
@@ -8,8 +8,9 @@ import hydra
 from hydra.core.config_store import ConfigStore
 
 import torch
+import torch.nn as nn
 from torch import Tensor
-from torch.optim import Adam
+from torch.optim import AdamW, Optimizer
 from torchinfo import summary
 from torch.utils.tensorboard import SummaryWriter
 
@@ -17,572 +18,244 @@ import rootutils
 
 root = rootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
 
-from sop.utils.graph_torch import TorchGraph, generate_sop_graphs, preprocess_graph
-from sop.utils.visualization import (
-    plot_solutions,
-    plot_heuristics,
-    Stats,
-    plot_statistics,
-)
-from sop.utils.path import evaluate_path, path_to_heatmap, Path
-from sop.utils.seed import random_seed, set_seed
-
-from sop.mcts.aco2 import (
-    sop_aco_solver,
-    rollout,
-    categorical_action_selection,
-    eps_greedy_action_selection,
-    reward_failure_scoring_fn,
-    RolloutOutput,
-    aco_search,
-    search,
-)
-
+from sop.utils.dataset import DataLoader
+from sop.utils.checkpoint import TrainState, save_checkpoint, load_checkpoint
+from sop.utils.graph import TorchGraph, generate_sop_graphs
+from sop.utils.sample import sample_range
 from sop.models.egt import EGT
+from sop.inference.rollout import (
+    categorical_action_selection,
+    reward_failure_scoring_fn,
+    eps_greedy_action_selection,
+)
+from sop.train.preprocess import (
+    preprocess_graph_mean,
+    preprocess_graph_normalize_budget,
+)
+from sop.train.reinforce import heuristic_walk, reinforce_loss, reinforce_loss_ER
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 @dataclass
 class Config:
-    # Data
-    dataset_dir: str = "data"
-    visual_dir: str = "viz"
-    seed: Optional[int] = None
-    dataset_name: Optional[str] = None
-    # Batch
-    batch_size: int = 32
+    # General
     device: str = DEVICE
-    # Graph
+
+    # Data
+    data_dir: str = "data"
+    eval_data_name: str = "dataset_32_50_0"
+
+    # Graph Generation
     num_nodes: int = 50
-    budget: int = 2
     start_node: int = 0
     goal_node: int = 49
-    # Sampling
     num_samples: int = 100
     kappa: float = 0.5
-    # ACO
+
+    # Training
+    batch_size: int = 32
+    num_epochs: int = 100
+    num_steps: int = 50
+
+    # checkpoint
+    checkpoint_dir: str = "checkpoints"
+    experiment_name: str = "EGT"
+    checkpoint_name: Optional[str] = None
+
+    # Reinforce
     num_rollouts: int = 100
-    num_iterations: int = 10
-    p_f: float = 0.1
+    entropy_coef: float = 0.1
+    eps: float = 0.1
+
+    # Constraints
+    min_budget: float = 2
+    max_budget: float = 2
+    min_p_f: float = 0.1
+    max_p_f: float = 0.1
+    # Eval
+    eval_budget: float = 2
+    eval_p_f: float = 0.1
+
     # EGT
+    node_dim: int = 5
+    edge_dim: int = 5
     node_hidden_dim: int = 64
     edge_hidden_dim: int = 16
     num_heads: int = 4
     num_layers: int = 3
-    # Training
+
+    # Optimizer
     lr: float = 1e-3
-    entropy_coef: float = 0.1
-    num_epochs: int = 10
-    num_steps: int = 25
-    # Evaluation
-    num_runs: int = 10
-    # MILP
-    milp_time_limit: Optional[int] = None
+    clip: float = 0.5
 
 
 cs = ConfigStore.instance()
-cs.store(name="aco_sop2", node=Config)
+cs.store(name="train_egt", node=Config)
 
 
-def clamp(value, lower, upper):
-    return max(lower, min(value, upper))
-
-
-# --- DATASET
-
-
-def load_dataset(cfg: Config) -> TorchGraph:
-    # Checks
-    start_node = clamp(cfg.start_node, 0, cfg.num_nodes - 1)
-    goal_node = clamp(cfg.goal_node, 0, cfg.num_nodes - 1)
-
-    # Set seed if given
-    if cfg.seed is not None:
-        set_seed(cfg.seed)
-
-    graphs = generate_sop_graphs(
-        cfg.batch_size,
-        cfg.num_nodes,
-        start_node,
-        goal_node,
-        cfg.budget,
-        cfg.num_samples,
-        cfg.kappa,
-    )
-
-    # Reset seed
-    set_seed(random_seed())
-
-    return graphs
-
-
-# --- VISUALIZATION
-
-
-def create_viz_prefix(cfg: Config):
-    viz_path = os.path.join(cfg.dataset_dir, cfg.visual_dir)
-    viz_name = f"{cfg.seed}_{cfg.batch_size}_{cfg.num_nodes}"
-    print(f"Creating vizualization folder {viz_path}...")
-    os.makedirs(viz_path, exist_ok=True)
-    viz_prefix = os.path.join(viz_path, viz_name)
-    return viz_prefix
-
-
-def save_path(
-    cfg: Config,
-    paths: Path,
+def train_model(
+    model: nn.Module,
+    optimizer: Optimizer,
     graphs: TorchGraph,
-    label: str,
-    index: int = 0,
-    prefix: Optional[str] = None,
-):
-    path, graph = paths[index].unsqueeze(0), graphs[index].unsqueeze(0)
-
-    failure_prob, avg_cost = evaluate_path(path, graph, cfg.num_samples, cfg.kappa)
-    info = f"""\
-    {label};
-    R: {float(path.reward.sum(-1)):.5f},
-    """
-    info = (
-        f"{label}; "
-        f"R: {float(path.reward.sum(-1)):.5f}, "
-        f"B: {float(graph.extra['budget'])}, "
-        f"C: {float(avg_cost):.5f}, "
-        f"F: {float(failure_prob):.3f}, "
-        f"N: {float(int(path.length))}, "
-    )
-    print(info)
-
-    out_path = prefix + f"_{label}" if prefix is not None else prefix
-    plot_solutions(
-        graph.squeeze(0),
-        paths=[path.squeeze(0)],
-        titles=[info],
-        out_path=out_path,
-        rows=1,
-        cols=1,
-    )
-
-
-# --- HEURISTICS
-
-
-def mcts_sopcc_heuristic(rewards: Tensor, sampled_costs: Tensor):
-    average_cost = sampled_costs.mean(dim=-1)
-    return rewards.unsqueeze(-1) / average_cost
-
-
-def mcts_sopcc_norm_heuristic(rewards: Tensor, sampled_costs: Tensor):
-    # Average and normalize costs
-    s = sampled_costs.mean(dim=-1)
-    s_norm = s / s.sum(dim=-1, keepdim=True)
-    # Average and normalize rewards
-    r_norm = rewards / rewards.sum(-1, keepdim=True)
-    return (r_norm.unsqueeze(-1) + 1e-5) / s_norm
-
-
-# --- REINFORCE
-
-
-def generate_paths(
-    cfg: Config,
-    graphs: TorchGraph,
-    heuristic: Tensor,
-    action_selection_fn: Callable = categorical_action_selection,
-):
-    start_node = graphs.extra["start_node"]
-    budget = graphs.extra["budget"]
-    goal_node = graphs.extra["goal_node"]
-
-    batch_size, num_nodes = graphs.size()
-    indices = torch.arange(batch_size)
-
-    # Loop State
-    current_node = start_node.clone()
-    current_budget = budget.clone()
-
-    # Initialize Path
-    path = Path.empty(batch_size, num_nodes)
-    path.append(indices, current_node)
-    # Mask goal node
-    path.mask[indices, goal_node] = 1
-
-    # Rollout
-    output = rollout(
-        heuristic,
-        graphs,
-        current_node,
-        current_budget,
-        path,
-        cfg.num_rollouts,
-        cfg.p_f,
-        action_selection_fn,
-        store_log_probs=True,
-    )
-
-    return output
-
-
-def temperature_scaled_softmax(logits: Tensor, temperature: Tensor, dim=1):
-    logits = logits / temperature
-    return torch.softmax(logits, dim)
-
-
-def reinforce_loss(cfg: Config, scores: Tensor, log_probs: Tensor):
-    A = (scores - scores.mean(-1, keepdim=True)) / (scores.std(-1, keepdim=True) + 1e-9)
-    sum_probs = log_probs.sum(-1)
-    loss = (A * sum_probs).sum(-1)
-    loss = loss.mean(-1)
-
-    return -loss
-
-
-def reinforce_loss_entropy_regularization(
-    cfg: Config, scores: Tensor, log_probs: Tensor
-):
-    A = (scores - scores.mean(-1, keepdim=True)) / (scores.std(-1, keepdim=True) + 1e-9)
-    sum_probs = log_probs.sum(-1)
-    reinforce_loss = (A * sum_probs).sum(-1)
-
-    entropy_loss = -(log_probs.exp() * log_probs).sum(-1).sum(-1)
-    loss = reinforce_loss.mean(-1) + cfg.entropy_coef * entropy_loss.mean(-1)
-
-    return -loss
-
-
-def reinforce_loss_entropy_regularization_manual(
-    cfg: Config, scores: Tensor, log_probs: Tensor
-):
-    A = (scores - scores.mean(-1, keepdim=True)) / (scores.std(-1, keepdim=True) + 1e-9)
-    sum_probs = log_probs.sum(-1)
-    reinforce_loss = (A * sum_probs).sum(-1)
-
-    entropy_loss = -(log_probs.exp() * log_probs).sum(-1).sum(-1)
-    loss = reinforce_loss.sum(-1) + cfg.entropy_coef * entropy_loss.sum(-1)
-
-    return -loss
-
-
-def train_reinforce_manual(
-    cfg: Config,
-    graphs: TorchGraph,
-    heuristic: Tensor,
-    lr: float = 1e-2,
+    num_rollouts: int,
+    p_f: Tensor,
+    clip: float,
+    preprocess_fn: Callable = preprocess_graph_mean,
     loss_fn: Callable = reinforce_loss,
     action_selection_fn: Callable = categorical_action_selection,
 ):
-    def train_step(scores: Tensor, log_probs: Tensor):
-        loss = loss_fn(cfg, scores, log_probs)
-        loss.backward()
-        heuristic.data -= lr * heuristic.grad
-        heuristic.grad = None
+    model.train()
 
-        return loss
-
-    output = generate_paths(cfg, graphs, heuristic, action_selection_fn)
-    scores = reward_failure_scoring_fn(output, cfg.p_f)
-    loss = train_step(scores, output.log_probs)
-
-    return loss, scores
-
-
-def train_reinforce(
-    cfg: Config,
-    graphs: TorchGraph,
-    model: torch.nn.Module,
-    optimizer: torch.optim.Optimizer,
-    loss_fn: Callable = reinforce_loss,
-    action_selection_fn: Callable = categorical_action_selection,
-):
-    def train_step(scores: Tensor, log_probs: Tensor):
-        loss = loss_fn(cfg, scores, log_probs)
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-
-        return loss
-
-    # Predict Heuristic
-    node_features, edge_features, adj = preprocess_graph(graphs)
+    # Predict heuristic
+    node_features, edge_features, adj = preprocess_fn(graphs)
     heuristic = model(node_features, edge_features, adj)
 
-    output = generate_paths(cfg, graphs, heuristic, action_selection_fn)
-    scores = reward_failure_scoring_fn(output, cfg.p_f)
-    loss = train_step(scores, output.log_probs)
+    # Generate Trajectories
+    output = heuristic_walk(graphs, heuristic, num_rollouts, p_f, action_selection_fn)
+    scores = reward_failure_scoring_fn(output, p_f)
+    loss = loss_fn(scores, output.log_probs)
+
+    # Update weights
+    optimizer.zero_grad()
+    loss.backward()
+    # gradient clipping
+    torch.nn.utils.clip_grad_norm_(model.parameters(), clip)
+    optimizer.step()
 
     return loss, scores
 
 
-# --- EVALUATION
 def eval_model(
-    cfg: Config,
+    model: nn.Module,
     graphs: TorchGraph,
-    model: torch.nn.Module,
+    num_rollouts: int,
+    p_f: Tensor,
+    preprocess_fn: Callable = preprocess_graph_mean,
     action_selection_fn: Callable = categorical_action_selection,
 ):
-    node_features, edge_features, adj = preprocess_graph(graphs)
+    model.eval()
+    node_features, edge_features, adj = preprocess_fn(graphs)
     heuristic = model(node_features, edge_features, adj)
-    output = generate_paths(cfg, graphs, heuristic, action_selection_fn)
-    scores = reward_failure_scoring_fn(output, cfg.p_f)
-
-    return output, scores
-
-
-def eval_heuristic(
-    cfg: Config,
-    graphs: TorchGraph,
-    heuristic: Tensor,
-    action_selection_fn: Callable = categorical_action_selection,
-):
-    output = generate_paths(cfg, graphs, heuristic, action_selection_fn)
-    scores = reward_failure_scoring_fn(output, cfg.p_f)
-
-    return output, scores
+    output = heuristic_walk(graphs, heuristic, num_rollouts, p_f, action_selection_fn)
+    scores = reward_failure_scoring_fn(output, p_f)
+    return scores
 
 
-# --- TEST
+@hydra.main(version_base=None, config_name="train_egt")
+def main(cfg: Config) -> None:
+    torch.set_default_device(cfg.device)
 
+    # Experiment
+    experiment_dir = os.path.join(cfg.checkpoint_dir, cfg.experiment_name)
+    log_dir = os.path.join(experiment_dir, "tensorboard")
+    writer = SummaryWriter(log_dir)
 
-def test_search(
-    cfg: Config,
-    graphs: TorchGraph,
-    heuristic: Tensor,
-    index: int = 0,
-    search_fn: Callable = search,
-):
-    graph = graphs[index]
-    heuristic = heuristic[index]
+    # Load Eval Dataset
+    print("Loading Eval Dataset...")
+    dataloader = DataLoader(cfg.data_dir)
+    eval_graphs, sop_cfg = dataloader.load(cfg.eval_data_name)
 
-    # Expand graph
-    graph = graph.unsqueeze(0).expand(cfg.num_runs)
-    heuristic = heuristic.unsqueeze(0).expand(
-        (cfg.num_runs, cfg.num_nodes, cfg.num_nodes)
-    )
-
-    paths, is_success = sop_aco_solver(
-        graph,
-        heuristic,
-        cfg.num_rollouts,
-        cfg.num_iterations,
-        cfg.p_f,
-        cfg.kappa,
-        search_fn=search_fn,
-    )
-    reward = paths.reward.sum(-1)
-
-    min_reward = float(torch.min(reward))
-    avg_reward = float(reward.sum(-1) / cfg.num_runs)
-    max_reward = float(torch.max(reward))
-    failure_prob = float(1 - (is_success.sum(-1) / cfg.num_runs))
-
-    print(f"Results averaged over {cfg.num_runs} runs:")
-    print(
-        "Params:\n"
-        + f"- num_nodes: {cfg.num_nodes}\n"
-        + f"- p_f: {cfg.p_f}\n"
-        + f"- num_iterations: {cfg.num_iterations}\n"
-        + f"- num_rollouts: {cfg.num_rollouts}\n"
-        + f"- num_samples: {cfg.num_samples}"
-    )
-    print(f"Min Reward: {min_reward}")
-    print(f"Avg Reward: {avg_reward}")
-    print(f"Max Reward: {max_reward}")
-    print(f"Failure Prob: {failure_prob:0.3f}")
-
-    return Stats(
-        paths=paths,
-        min_reward=min_reward,
-        avg_reward=avg_reward,
-        max_reward=max_reward,
-        failure_prob=failure_prob,
-    )
-
-
-def test_rollout(cfg: Config, graphs: TorchGraph, heuristic: Tensor, index: int = 0):
-    graph = graphs[index].unsqueeze(0)
-    heuristic = heuristic[index].unsqueeze(0)
-    output = generate_paths(cfg, graph, heuristic)
-
-    reward = output.path.reward.sum(-1)
-    min_reward = float(torch.min(reward))
-    avg_reward = float(reward.sum(-1) / cfg.num_rollouts)
-    max_reward = float(torch.max(reward))
-    failure_prob = (output.residual < 0).sum(-1) / output.residual.shape[-1]
-    failure_prob = float(failure_prob.mean(-1))
-
-    print(f"Results averaged over {cfg.num_rollouts} runs:")
-    print(
-        "Params:\n"
-        + f"- num_nodes: {cfg.num_nodes}\n"
-        + f"- p_f: {cfg.p_f}\n"
-        + f"- num_samples: {cfg.num_samples}"
-    )
-    print(f"Min Path: {min_reward}")
-    print(f"Avg Reward: {avg_reward}")
-    print(f"Max Reward: {max_reward}")
-    print(f"Failure Prob: {failure_prob:0.3f}")
-
-    return Stats(
-        paths=output.path.squeeze(0),
-        min_reward=min_reward,
-        avg_reward=avg_reward,
-        max_reward=max_reward,
-        failure_prob=failure_prob,
-    )
-
-
-# -- MAIN
-def main_egt(cfg: Config, eval_graphs: TorchGraph, writer: SummaryWriter):
-    # Load sample data
-    node_features, edge_features, adj = preprocess_graph(eval_graphs)
-    node_dim = node_features.shape[-1]
-    edge_dim = edge_features.shape[-1]
-
-    # Load model
-    egt = EGT(
-        node_dim,
-        edge_dim,
+    # Load Model and Optimizer
+    print("Loading model...")
+    model = EGT(
+        cfg.node_dim,
+        cfg.edge_dim,
         cfg.node_hidden_dim,
         cfg.edge_hidden_dim,
         cfg.num_heads,
         cfg.num_layers,
     )
-    # Summary
-    N = cfg.num_nodes
-    summary(egt, [(1, N, node_dim), (1, N, N, edge_dim), (1, N, N)])
-    # Load optimizer
-    optimizer = Adam(egt.parameters(), lr=cfg.lr)
-    # Initial Test
-    heuristic = egt(node_features, edge_features, adj)
-    old_heuristic = heuristic.clone().detach()
+    optimizer = AdamW(model.parameters(), lr=cfg.lr)
 
-    # Initial Eval
-    _, scores = eval_model(cfg, eval_graphs, egt)
-    writer.add_scalar("EGT/eval", scores.mean(), 0)
+    # Model Summary
+    summary(model, [(1, 1, cfg.node_dim), (1, 1, 1, cfg.edge_dim), (1, 1, 1)])
 
-    # Train Model
-    i = 0
+    # Load Checkpoint
+    if cfg.checkpoint_name is not None:
+        print(f"Resuming from checkpoint: `{cfg.checkpoint_name}` ...")
+        state = load_checkpoint(model, optimizer, experiment_dir, cfg.checkpoint_name)
+    else:
+        state = TrainState(cfg=cfg)
+
+    # Loss Function
+    loss_fn = partial(reinforce_loss_ER, entropy_coef=cfg.entropy_coef)
+    # Preprocess Fn
+    preprocess_fn = preprocess_graph_normalize_budget
+    # Action Selection
+    action_selection_fn = categorical_action_selection
+
+    # 0. Test initial performance
+    print("Evaluating initial model...")
+    p_f = torch.full((eval_graphs.shape[0],), cfg.eval_p_f, dtype=torch.float32)
+    scores = eval_model(
+        model, eval_graphs, cfg.num_rollouts, p_f, preprocess_fn, action_selection_fn
+    )
+    eval_i = state.num_steps // cfg.num_steps
+    writer.add_scalar("eval/avg_score", scores.mean(-1).mean(), eval_i)
+    writer.add_scalar("eval/best_score", scores.max(-1).values.mean(), eval_i)
+    writer.flush()
+
+    # Training Loop
     for epoch in range(cfg.num_epochs):
-        print(f"Starting epoch: {epoch}")
-        for step in tqdm(range(cfg.num_steps)):
-            # 1. Generate Graphs
-            graphs = load_dataset(cfg)
+        print(f"{epoch}: Starting Training...")
+        for _ in tqdm(range(cfg.num_steps)):
+            # 1. Generate random graphs
+            graphs = generate_sop_graphs(
+                cfg.batch_size,
+                cfg.num_nodes,
+                cfg.start_node,
+                cfg.goal_node,
+                cfg.min_budget,
+                cfg.num_samples,
+                cfg.kappa,
+            )
+            # Generalize Constraints
+            graphs.extra["budget"] = sample_range(
+                cfg.batch_size, cfg.min_budget, cfg.max_budget
+            )
+            p_f = sample_range(cfg.batch_size, cfg.min_p_f, cfg.max_p_f)
 
-            # 2. Train Reinforce
-            loss, scores = train_reinforce(
-                cfg,
-                graphs,
-                egt,
+            # 2. Train
+            loss, scores = train_model(
+                model,
                 optimizer,
-                loss_fn=reinforce_loss_entropy_regularization_manual,
-                action_selection_fn=categorical_action_selection,
-            )
-
-            # 3. Log
-            writer.add_scalar("EGT/train", scores.mean(), i)
-            writer.add_scalar("EGT/loss", loss, i)
-            i += 1
-
-        # 4. Evaluation
-        print(f"[{epoch}] Running evaluation")
-        _, scores = eval_model(cfg, eval_graphs, egt)
-        writer.add_scalar("EGT/eval", scores.mean(), i)
-
-    # For comparisons
-    heuristic = egt(node_features, edge_features, adj)
-    return heuristic, old_heuristic
-
-
-def main_heuristic(cfg: Config, graphs: TorchGraph, writer: SummaryWriter):
-    heuristic = mcts_sopcc_heuristic(graphs.nodes["reward"], graphs.edges["samples"])
-    heuristic.requires_grad_(True)
-
-    # Initial Eval
-    old_heuristic = heuristic.clone().detach()
-    _, scores = eval_heuristic(cfg, graphs, old_heuristic)
-    writer.add_scalar("SOPCC/eval", scores.mean(), 0)
-
-    # Optimize Heuristic
-    i = 0
-    for epoch in range(cfg.num_epochs):
-        print(f"Starting epoch: {epoch}")
-        for step in tqdm(range(cfg.num_steps)):
-            loss, scores = train_reinforce_manual(
-                cfg,
                 graphs,
-                heuristic,
-                loss_fn=reinforce_loss_entropy_regularization_manual,
+                cfg.num_rollouts,
+                p_f,
+                cfg.clip,
+                preprocess_fn,
+                loss_fn,
+                action_selection_fn,
             )
 
-            # 3. Log
-            writer.add_scalar("SOPCC/train", scores.mean(), i)
-            writer.add_scalar("SOPCC/loss", loss, i)
-            i += 1
+            # 3. Log metrics
+            i = state.num_steps
+            writer.add_scalar("train/loss", loss, i)
+            writer.add_scalar("train/avg_score", scores.mean(-1).mean(), i)
+            writer.add_scalar("train/best_score", scores.max(-1).values.mean(), i)
+            writer.flush()
+            state.num_steps += 1
 
-        print(f"[{epoch}] Running evaluation")
-        _, scores = eval_heuristic(cfg, graphs, heuristic)
-        writer.add_scalar("SOPCC/eval", scores.mean(), i)
-
-    # For comparisons
-    return heuristic, old_heuristic
-
-
-@hydra.main(version_base=None, config_name="aco_sop2")
-def main(cfg: Config) -> None:
-    torch.set_default_device(cfg.device)
-
-    # Directories
-    viz_prefix = create_viz_prefix(cfg)
-
-    # Generate Eval Dataset
-    print("Loading Eval Dataset...")
-    eval_graphs = load_dataset(cfg)
-    cfg.seed = None
-
-    # Tensorboard
-    writer = SummaryWriter()
-
-    egt_heuristic, egt_old_heuristic = main_egt(cfg, eval_graphs, writer)
-    sopcc_heuristic, sopcc_old_heuristic = main_heuristic(cfg, eval_graphs, writer)
-
-    heuristics = [egt_heuristic, sopcc_heuristic]
-    old_heuristics = [egt_old_heuristic, sopcc_old_heuristic]
-    titles = ["EGT", "SOPCC"]
-    for title, heuristic, old_heuristic in zip(titles, heuristics, old_heuristics):
-        print(f"{title} Old ACO Search")
-        o_stats = test_search(
-            cfg, eval_graphs, old_heuristic, index=0, search_fn=aco_search
+        # 4. Evaluate
+        print(f"{epoch}: Evaluating...")
+        p_f = torch.full((eval_graphs.shape[0],), cfg.eval_p_f, dtype=torch.float32)
+        scores = eval_model(
+            model,
+            eval_graphs,
+            cfg.num_rollouts,
+            p_f,
+            preprocess_fn,
+            action_selection_fn,
         )
-        print("---------")
-        print(f"{title} Rollout")
-        r_stats = test_rollout(cfg, eval_graphs, heuristic, index=0)
-        print("---------")
-        print(f"{title} Search")
-        s_stats = test_search(cfg, eval_graphs, heuristic, index=0, search_fn=search)
-        print("---------")
-        print(f"{title} Trained ACO Search")
-        a_stats = test_search(
-            cfg, eval_graphs, heuristic, index=0, search_fn=aco_search
-        )
-        print("---------")
-        print("Visualizing...")
-        save_path(
-            cfg, a_stats.paths, eval_graphs, index=0, label=title, prefix=viz_prefix
-        )
-        plot_heuristics(
-            heuristics=[old_heuristic[0], heuristic[0].detach()],
-            titles=["Old_H", "New_H"],
-            out_path=viz_prefix + f"_{title}_heatmap",
-            cols=2,
-        )
-        plot_statistics(
-            stats=[o_stats, r_stats, s_stats, a_stats],
-            titles=["Old ACO", "Rollout", "Search", "ACO"],
-            out_path=viz_prefix + f"_{title}_stats",
-            rows=2,
-            cols=2,
-        )
+        eval_i = state.num_steps // cfg.num_steps
+        writer.add_scalar("eval/avg_score", scores.mean(-1).mean(), eval_i)
+        writer.add_scalar("eval/best_score", scores.max(-1).values.mean(), eval_i)
+        writer.flush()
+
+        # 5. Save checkpoint
+        checkpoint_name = f"{state.num_steps}_checkpoint.pth"
+        save_checkpoint(model, optimizer, state, experiment_dir, checkpoint_name)
 
 
 if __name__ == "__main__":

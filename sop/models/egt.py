@@ -153,9 +153,13 @@ class EGT(nn.Module):
             ]
         )
 
+        self.decoder_ln = nn.LayerNorm(edge_hidden_dim)
         self.decoder = FFN(edge_hidden_dim, edge_hidden_dim, 1)
 
     def forward(self, node_features: Tensor, edge_features: Tensor, adj: Tensor):
+        # Mask Edge features
+        edge_features = edge_features * adj.unsqueeze(-1)
+
         # Embed features
         node_emb = self.node_emb(node_features)
         edge_emb = self.edge_emb(edge_features)
@@ -163,7 +167,7 @@ class EGT(nn.Module):
         for layer in self.layers:
             node_emb, edge_emb = layer(node_emb, edge_emb, adj)
 
-        edge_scores = self.decoder(edge_emb).squeeze(-1)
+        edge_scores = self.decoder(self.decoder_ln(edge_emb)).squeeze(-1)
         return edge_scores
 
 
@@ -176,7 +180,8 @@ if __name__ == "__main__":
     root = rootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
 
     # Import utils
-    from sop.utils.graph_torch import generate_sop_graphs, preprocess_graph
+    from sop.utils.graph import generate_sop_graphs
+    from sop.train.preprocess import preprocess_graph_mean
 
     # Example graph preprocess
     start = time.time()
@@ -197,7 +202,7 @@ if __name__ == "__main__":
     print(f"Graph Gen: {time.time() - start}")
 
     start = time.time()
-    node_features, edge_features, adj = preprocess_graph(graphs)
+    node_features, edge_features, adj = preprocess_graph_mean(graphs)
     print(f"Preprocess: {time.time() - start}")
 
     start = time.time()
