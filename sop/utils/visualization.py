@@ -14,10 +14,13 @@ from sop.utils.path import Path
 
 
 # -- Utilities
-def subplots(rows: int, cols: int) -> Tuple[Figure, Axes]:
-    fig, axs = plt.subplots(rows, cols)
-    if type(axs) is not list:
-        axs = [axs]
+def subplots(N: int, cols: int, axsize: Tuple[int, int]) -> Tuple[Figure, Axes]:
+    cols = min(N, cols)
+    rows = math.ceil(N / cols)
+    size = (axsize[0] * cols, axsize[1] * rows)
+
+    fig, axs = plt.subplots(rows, cols, figsize=size)
+    axs = [axs] if (rows * cols) == 1 else axs.flatten()
     for ax in axs:
         ax.set_axis_off()
     return fig, axs
@@ -40,8 +43,7 @@ def plot_solutions(
     cols: int = 2,
 ):
     assert len(paths) == len(titles)
-    rows = math.ceil(len(titles) / cols)
-    fig, axs = subplots(rows, cols)
+    fig, axs = subplots(len(titles), cols, axsize=(9, 6))
 
     for i, (path, title) in enumerate(zip(paths, titles)):
         ax = axs[i]
@@ -60,8 +62,7 @@ def plot_heuristics(
     cols: int = 2,
 ):
     assert len(heuristics) == len(titles)
-    rows = math.ceil(len(titles) / cols)
-    fig, axs = subplots(rows, cols)
+    fig, axs = subplots(len(titles), cols, axsize=(9, 6))
 
     for i, (heuristic, title) in enumerate(zip(heuristics, titles)):
         ax = axs[i]
@@ -80,8 +81,7 @@ def plot_statistics(
     data_labels: list[str] = ["Min", "Avg", "Max", "p_f"],
 ):
     assert len(statistics) == len(titles)
-    rows = math.ceil(len(titles) / cols)
-    fig, axs = subplots(rows, cols)
+    fig, axs = subplots(len(titles), cols, axsize=(9, 6))
 
     # data = {
     #     "Walk": (4.21, 9.10, 10.50, 0.11),

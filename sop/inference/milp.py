@@ -1,11 +1,14 @@
 from typing import Optional
+from functools import partial
 import pulp
 import torch
 from torch import Tensor
 import re
+from multiprocessing import Pool
 
 from sop.utils.graph import TorchGraph
 from sop.utils.path import Path
+from sop.utils.sample import sample_costs
 
 """
 The MILP formulation for SOP is taken from the following paper:
@@ -53,17 +56,20 @@ s.t.
 def create_pulp_instance(
     rewards: Tensor,
     costs: Tensor,
-    samples: Tensor,
     budget: float,
     start: int,
     goal: int,
     num_samples: int,
+    kappa: float,
     M: int = 1000,
     alpha_prime: float = 0.1,
 ) -> pulp.LpProblem:
     # Make sure graph is not batched
     assert rewards.ndim == 1 and costs.ndim == 2, "Graph is not in corrrect format."
     num_nodes = int(rewards.shape[0])
+
+    # Generate Samples
+    samples = sample_costs(costs, num_samples, kappa)
 
     # Setup maximization problem
     prob = pulp.LpProblem("SOP", pulp.LpMaximize)
@@ -159,7 +165,7 @@ def extract_solution(prob):
     return edge_dict
 
 
-def edge_list_to_path(
+def edge_dict_to_path(
     edge_dict: dict, start_node: int, goal_node: int, rewards: Tensor
 ) -> Path:
     num_nodes = int(rewards.shape[0])
@@ -178,32 +184,59 @@ def edge_list_to_path(
 
         current_node = next_node
 
-    return path
+    return path.squeeze(0)
 
 
-def sop_milp_solver(
+def solve_sop_instance(
     graph: TorchGraph,
+    alpha_prime: float = 0.075,
     time_limit: Optional[int] = 180,
     num_samples: int = 100,
+    kappa: float = 0.5,
     M: int = 1000,
-    alpha_prime: float = 0.075,
+    log_output: bool = True,
 ) -> Path:
     R = graph.nodes["reward"]
     C = graph.edges["distance"]
-    S = graph.edges["samples"]
     b = float(graph.extra["budget"])
     s = int(graph.extra["start_node"])
     g = int(graph.extra["goal_node"])
 
     print("Generating PuLP instance...")
-    prob = create_pulp_instance(R, C, S, b, s, g, num_samples, M, alpha_prime)
+    prob = create_pulp_instance(R, C, b, s, g, num_samples, kappa, M, alpha_prime)
 
-    solver = pulp.getSolver("HiGHS")
+    solver = pulp.getSolver("GUROBI_CMD")
     if time_limit is not None:
         solver.timeLimit = time_limit
 
     print("Solving instance...")
     result = prob.solve(solver)
-    print(result)
+    if log_output:
+        print(result)
     edge_dict = extract_solution(prob)
-    return edge_list_to_path(edge_dict, s, g, R)
+    return edge_dict_to_path(edge_dict, s, g, R)
+
+
+def solve_sop_multithread(
+    graphs: TorchGraph,
+    num_workers: int,
+    alpha_prime: float = 0.075,
+    time_limit: Optional[int] = 180,
+    num_samples: int = 100,
+    kappa: float = 0.5,
+    M: int = 1000,
+    log_output: bool = True,
+) -> Path:
+    f = partial(
+        solve_sop_instance,
+        alpha_prime=alpha_prime,
+        time_limit=time_limit,
+        num_samples=num_samples,
+        kappa=kappa,
+        M=M,
+        log_output=log_output,
+    )
+    with Pool(num_workers) as p:
+        paths = p.map(f, graphs)
+    paths = torch.stack(paths, dim=0)
+    return paths
