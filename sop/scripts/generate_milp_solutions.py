@@ -44,8 +44,8 @@ def main(cfg: Config) -> None:
 
     # Load Dataset
     dataloader = DataLoader(cfg.data_dir)
-    graphs, sop_config = dataloader.load(cfg.data_name)
-    print(sop_config)
+    graphs, sop_cfg = dataloader.load(cfg.data_name)
+    print(sop_cfg)
 
     # TODO: Add progress persistence
     paths = solve_sop_multithread(
@@ -54,7 +54,7 @@ def main(cfg: Config) -> None:
         cfg.p_f,
         cfg.time_limit,
         cfg.num_samples,
-        sop_config.kappa,
+        sop_cfg.kappa,
     )
     dataloader.save_solutions(cfg.data_name, paths, "milp")
     paths = dataloader.load_solutions(cfg.data_name, "milp")

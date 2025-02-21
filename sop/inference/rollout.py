@@ -49,6 +49,15 @@ def eps_greedy_action_selection(
     return actions
 
 
+# -- Scoring Functions
+def reward_failure_scoring_fn(output: "RolloutOutput", p_f: float) -> Tensor:
+    reward = output.path.reward.sum(-1)
+    failure_prob = (output.residual < 0).sum(-1) / output.residual.shape[-1]
+    F = torch.clamp(failure_prob - p_f, min=0)
+    scores = reward * (1 - F)
+    return scores
+
+
 # -- ROLLOUT
 # B: Batch Size, N: Num Nodes, R: Num Rollouts, S: Num Samples
 

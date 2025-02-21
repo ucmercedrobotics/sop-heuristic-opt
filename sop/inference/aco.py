@@ -9,7 +9,12 @@ from tensordict import tensorclass
 from sop.utils.path import Path
 from sop.utils.graph import TorchGraph
 from sop.utils.sample import sample_costs
-from sop.inference.rollout import RolloutOutput, rollout, categorical_action_selection
+from sop.inference.rollout import (
+    RolloutOutput,
+    rollout,
+    categorical_action_selection,
+    reward_failure_scoring_fn,
+)
 
 
 @torch.no_grad
@@ -160,28 +165,6 @@ def aco_search(
 
     next_node = state.best_path[indices, 1]
     return next_node
-
-
-# -- SCORING
-def reward_failure_scoring_fn(output: RolloutOutput, p_f: float):
-    reward = output.path.reward.sum(-1)
-    failure_prob = (output.residual < 0).sum(-1) / output.residual.shape[-1]
-    F = torch.clamp(failure_prob - p_f, min=0)
-    scores = reward * (1 - F)
-    return scores
-
-
-def rank_output(output: RolloutOutput, scores: Tensor, topk: Optional[int] = None):
-    batch_size, num_rollouts = output.shape
-    topk = topk if topk is not None else num_rollouts
-    topk_shape = (batch_size, topk)
-
-    b_indices = torch.arange(batch_size).unsqueeze(-1).expand(topk_shape)
-
-    ranked_score, ranked_i = torch.topk(scores, k=topk, dim=-1, sorted=True)
-    ranked_output = output[b_indices, ranked_i]
-
-    return ranked_output, ranked_score, ranked_i
 
 
 # -- Local Heuristic Optimization
@@ -345,3 +328,16 @@ def update_best_path(
     state.best_path[better_i] = best_output.path.nodes[better_i]
     state.tau_max[better_i] = rho * state.best_score[better_i]
     state.tau_min[better_i] = state.tau_max[better_i] / a
+
+
+def rank_output(output: RolloutOutput, scores: Tensor, topk: Optional[int] = None):
+    batch_size, num_rollouts = output.shape
+    topk = topk if topk is not None else num_rollouts
+    topk_shape = (batch_size, topk)
+
+    b_indices = torch.arange(batch_size).unsqueeze(-1).expand(topk_shape)
+
+    ranked_score, ranked_i = torch.topk(scores, k=topk, dim=-1, sorted=True)
+    ranked_output = output[b_indices, ranked_i]
+
+    return ranked_output, ranked_score, ranked_i

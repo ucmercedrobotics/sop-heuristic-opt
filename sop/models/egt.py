@@ -176,7 +176,8 @@ if __name__ == "__main__":
     root = rootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
 
     # Import utils
-    from sop.utils.graph_torch import generate_sop_graphs, preprocess_graph
+    from sop.utils.graph import generate_sop_graphs
+    from sop.train.preprocess import preprocess_graph_mean
 
     # Example graph preprocess
     start = time.time()
@@ -197,7 +198,7 @@ if __name__ == "__main__":
     print(f"Graph Gen: {time.time() - start}")
 
     start = time.time()
-    node_features, edge_features, adj = preprocess_graph(graphs)
+    node_features, edge_features, adj = preprocess_graph_mean(graphs)
     print(f"Preprocess: {time.time() - start}")
 
     start = time.time()
