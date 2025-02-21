@@ -26,7 +26,7 @@ def categorical_action_selection(
 
 
 def eps_greedy_action_selection(
-    score: Tensor, mask: Tensor, eps: float = 0.1, store_log_probs: bool = False
+    score: Tensor, mask: Tensor, store_log_probs: bool = False, eps: float = 0.1
 ):
     # Sample actions
     masked_score = torch.masked_fill(score, mask, -torch.inf)
@@ -50,10 +50,10 @@ def eps_greedy_action_selection(
 
 
 # -- Scoring Functions
-def reward_failure_scoring_fn(output: "RolloutOutput", p_f: float) -> Tensor:
+def reward_failure_scoring_fn(output: "RolloutOutput", p_f: Tensor) -> Tensor:
     reward = output.path.reward.sum(-1)
     failure_prob = (output.residual < 0).sum(-1) / output.residual.shape[-1]
-    F = torch.clamp(failure_prob - p_f, min=0)
+    F = torch.clamp(failure_prob - p_f.unsqueeze(-1), min=0)
     scores = reward * (1 - F)
     return scores
 
@@ -140,7 +140,7 @@ def rollout(
     current_budget: Tensor,
     current_path: Tensor,
     num_rollouts: int,
-    p_f: float,
+    p_f: Tensor,
     action_selection_fn: Callable = categorical_action_selection,
     store_log_probs: bool = False,
 ):
@@ -198,7 +198,7 @@ def rollout(
             sample_n_g = samples[rs.batch_i, new_node, g]
             failure_prob = compute_failure_prob(sample_c_n, sample_n_g, rs.budgets)
 
-            below_failure = failure_prob <= p_f
+            below_failure = failure_prob <= p_f[rs.batch_i]
             below_i = valid_i[below_failure]
             # 2c. if Pr[...] <= p_f, add to path
             if below_i.numel() > 0:

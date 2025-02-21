@@ -21,12 +21,17 @@ root = rootutils.setup_root(__file__, indicator=".project-root", pythonpath=True
 from sop.utils.dataset import DataLoader
 from sop.utils.checkpoint import TrainState, save_checkpoint, load_checkpoint
 from sop.utils.graph import TorchGraph, generate_sop_graphs
+from sop.utils.sample import sample_range
 from sop.models.egt import EGT
 from sop.inference.rollout import (
     categorical_action_selection,
     reward_failure_scoring_fn,
+    eps_greedy_action_selection,
 )
-from sop.train.preprocess import preprocess_graph_mean
+from sop.train.preprocess import (
+    preprocess_graph_mean,
+    preprocess_graph_normalize_budget,
+)
 from sop.train.reinforce import heuristic_walk, reinforce_loss, reinforce_loss_ER
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -43,7 +48,6 @@ class Config:
 
     # Graph Generation
     num_nodes: int = 50
-    budget: int = 2
     start_node: int = 0
     goal_node: int = 49
     num_samples: int = 100
@@ -61,8 +65,17 @@ class Config:
 
     # Reinforce
     num_rollouts: int = 100
-    p_f: float = 0.1
     entropy_coef: float = 0.1
+    eps: float = 0.1
+
+    # Constraints
+    min_budget: float = 2
+    max_budget: float = 2
+    min_p_f: float = 0.1
+    max_p_f: float = 0.1
+    # Eval
+    eval_budget: float = 2
+    eval_p_f: float = 0.1
 
     # EGT
     node_dim: int = 5
@@ -74,6 +87,7 @@ class Config:
 
     # Optimizer
     lr: float = 1e-3
+    clip: float = 0.5
 
 
 cs = ConfigStore.instance()
@@ -85,7 +99,8 @@ def train_model(
     optimizer: Optimizer,
     graphs: TorchGraph,
     num_rollouts: int,
-    p_f: float,
+    p_f: Tensor,
+    clip: float,
     preprocess_fn: Callable = preprocess_graph_mean,
     loss_fn: Callable = reinforce_loss,
     action_selection_fn: Callable = categorical_action_selection,
@@ -104,6 +119,8 @@ def train_model(
     # Update weights
     optimizer.zero_grad()
     loss.backward()
+    # gradient clipping
+    torch.nn.utils.clip_grad_norm_(model.parameters(), clip)
     optimizer.step()
 
     return loss, scores
@@ -113,7 +130,7 @@ def eval_model(
     model: nn.Module,
     graphs: TorchGraph,
     num_rollouts: int,
-    p_f: float,
+    p_f: Tensor,
     preprocess_fn: Callable = preprocess_graph_mean,
     action_selection_fn: Callable = categorical_action_selection,
 ):
@@ -161,8 +178,23 @@ def main(cfg: Config) -> None:
     else:
         state = TrainState(cfg=cfg)
 
-    # Entroy regularization loss
+    # Loss Function
     loss_fn = partial(reinforce_loss_ER, entropy_coef=cfg.entropy_coef)
+    # Preprocess Fn
+    preprocess_fn = preprocess_graph_normalize_budget
+    # Action Selection
+    action_selection_fn = categorical_action_selection
+
+    # 0. Test initial performance
+    print("Evaluating initial model...")
+    p_f = torch.full((eval_graphs.shape[0],), cfg.eval_p_f, dtype=torch.float32)
+    scores = eval_model(
+        model, eval_graphs, cfg.num_rollouts, p_f, preprocess_fn, action_selection_fn
+    )
+    eval_i = state.num_steps // cfg.num_steps
+    writer.add_scalar("eval/avg_score", scores.mean(-1).mean(), eval_i)
+    writer.add_scalar("eval/best_score", scores.max(-1).values.mean(), eval_i)
+    writer.flush()
 
     # Training Loop
     for epoch in range(cfg.num_epochs):
@@ -174,27 +206,52 @@ def main(cfg: Config) -> None:
                 cfg.num_nodes,
                 cfg.start_node,
                 cfg.goal_node,
-                cfg.budget,
+                cfg.min_budget,
                 cfg.num_samples,
                 cfg.kappa,
             )
+            # Generalize Constraints
+            graphs.extra["budget"] = sample_range(
+                cfg.batch_size, cfg.min_budget, cfg.max_budget
+            )
+            p_f = sample_range(cfg.batch_size, cfg.min_p_f, cfg.max_p_f)
 
             # 2. Train
             loss, scores = train_model(
-                model, optimizer, graphs, cfg.num_rollouts, cfg.p_f, loss_fn=loss_fn
+                model,
+                optimizer,
+                graphs,
+                cfg.num_rollouts,
+                p_f,
+                cfg.clip,
+                preprocess_fn,
+                loss_fn,
+                action_selection_fn,
             )
 
             # 3. Log metrics
-            writer.add_scalar("train/loss", loss, state.num_steps)
-            writer.add_scalar("train/avg_score", scores.mean(), state.num_steps)
+            i = state.num_steps
+            writer.add_scalar("train/loss", loss, i)
+            writer.add_scalar("train/avg_score", scores.mean(-1).mean(), i)
+            writer.add_scalar("train/best_score", scores.max(-1).values.mean(), i)
+            writer.flush()
             state.num_steps += 1
 
         # 4. Evaluate
         print(f"{epoch}: Evaluating...")
-        scores = eval_model(model, eval_graphs, cfg.num_rollouts, cfg.p_f)
-        writer.add_scalar(
-            "eval/avg_score", scores.mean(), state.num_steps // cfg.num_steps
+        p_f = torch.full((eval_graphs.shape[0],), cfg.eval_p_f, dtype=torch.float32)
+        scores = eval_model(
+            model,
+            eval_graphs,
+            cfg.num_rollouts,
+            p_f,
+            preprocess_fn,
+            action_selection_fn,
         )
+        eval_i = state.num_steps // cfg.num_steps
+        writer.add_scalar("eval/avg_score", scores.mean(-1).mean(), eval_i)
+        writer.add_scalar("eval/best_score", scores.max(-1).values.mean(), eval_i)
+        writer.flush()
 
         # 5. Save checkpoint
         checkpoint_name = f"{state.num_steps}_checkpoint.pth"

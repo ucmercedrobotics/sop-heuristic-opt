@@ -75,27 +75,14 @@ def plot_heuristics(
 
 def plot_statistics(
     statistics: list[dict[str, list[float]]],
-    titles: list[str],
+    title: str,
     out_path: Optional[str] = None,
-    cols: int = 2,
     data_labels: list[str] = ["Min", "Avg", "Max", "p_f"],
 ):
-    assert len(statistics) == len(titles)
-    fig, axs = subplots(len(titles), cols, axsize=(9, 6))
-
-    # data = {
-    #     "Walk": (4.21, 9.10, 10.50, 0.11),
-    #     "Vanilla": (5.13, 10.13, 12.25, 0.1),
-    #     "ACO": (5.32, 10.82, 13.19, 0.0),
-    # }
-
-    for i, (stat, title) in enumerate(zip(statistics, titles)):
-        ax = axs[i]
-        ax.set_axis_on()
-        plot_bars(data_labels, stat, ax)
-        ax.set_ylabel("Reward")
-        ax.set_title(title)
-
+    fig, ax = plt.subplots(layout="constrained")
+    plot_bars(data_labels, statistics, ax)
+    ax.set_ylabel("Reward")
+    ax.set_title(title)
     show(out_path)
 
 
@@ -173,17 +160,18 @@ def plot_heatmap(
 
 
 def plot_bars(
-    data_labels: list[str], data: dict[str, list[float]], ax: Axes, width: float = 0.25
+    data_labels: list[str],
+    data: dict[str, list[float]],
+    ax: Axes,
+    width: float = 0.25,
 ):
     x = np.arange(len(data_labels))  # the label locations
     multiplier = 0
 
-    fig, ax = plt.subplots(layout="constrained")
-
     for attribute, measurement in data.items():
         offset = width * multiplier
         rects = ax.bar(x + offset, measurement, width, label=attribute)
-        ax.bar_label(rects, padding=3)
+        ax.bar_label(rects, padding=3, fmt=lambda x: f"{x:.3f}")
         multiplier += 1
 
     ax.set_xticks(x + width, data_labels)

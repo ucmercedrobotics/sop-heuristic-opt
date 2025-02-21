@@ -28,15 +28,12 @@ def reinforce_loss_ER(scores: Tensor, log_probs: Tensor, entropy_coef: float):
     return -loss
 
 
-# -- Scoring Functions
-
-
 # -- Wrapper around base rollout
 def heuristic_walk(
     graphs: TorchGraph,
     heuristic: Tensor,
     num_rollouts: int,
-    p_f: float,
+    p_f: Tensor,
     action_selection_fn: Callable = categorical_action_selection,
 ) -> RolloutOutput:
     start_node = graphs.extra["start_node"]

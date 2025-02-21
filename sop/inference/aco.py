@@ -23,7 +23,7 @@ def sop_aco_solver(
     heuristic: Tensor,
     num_rollouts: int,
     num_iterations: int,
-    p_f: float,
+    p_f: Tensor,
     kappa: float,
     search_fn: Callable,
     action_selection_fn: Callable = categorical_action_selection,
@@ -61,7 +61,7 @@ def sop_aco_solver(
             current_path=path[indices],
             num_rollouts=num_rollouts,
             num_iterations=num_iterations,
-            p_f=p_f,
+            p_f=p_f[indices],
             action_selection_fn=action_selection_fn,
         )
 
@@ -104,7 +104,7 @@ def vanilla_search(
     current_path: Path,
     num_rollouts: int,
     num_iterations: int,
-    p_f: float,
+    p_f: Tensor,
     action_selection_fn: Callable,
 ) -> Tensor:
     batch_size, num_nodes = graph.size()
@@ -137,7 +137,7 @@ def aco_search(
     current_path: Path,
     num_rollouts: int,
     num_iterations: int,
-    p_f: float,
+    p_f: Tensor,
     action_selection_fn: Callable,
 ) -> Tensor:
     batch_size, num_nodes = graph.size()

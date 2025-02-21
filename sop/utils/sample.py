@@ -17,6 +17,10 @@ def set_seed(seed: int) -> None:
     random.seed(seed)
 
 
+def sample_range(batch_size: int, min_val: float, max_val: float) -> Tensor:
+    return min_val + (max_val - min_val) * torch.rand(batch_size)
+
+
 def sample_exponential_distribution(rate: Tensor, num_samples: int) -> Tensor:
     """Faster Exponential distribution w/ https://en.wikipedia.org/wiki/Inverse_transform_sampling.
     x = -(1/rate)*ln(y)

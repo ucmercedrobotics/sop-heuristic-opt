@@ -153,9 +153,13 @@ class EGT(nn.Module):
             ]
         )
 
+        self.decoder_ln = nn.LayerNorm(edge_hidden_dim)
         self.decoder = FFN(edge_hidden_dim, edge_hidden_dim, 1)
 
     def forward(self, node_features: Tensor, edge_features: Tensor, adj: Tensor):
+        # Mask Edge features
+        edge_features = edge_features * adj.unsqueeze(-1)
+
         # Embed features
         node_emb = self.node_emb(node_features)
         edge_emb = self.edge_emb(edge_features)
@@ -163,7 +167,7 @@ class EGT(nn.Module):
         for layer in self.layers:
             node_emb, edge_emb = layer(node_emb, edge_emb, adj)
 
-        edge_scores = self.decoder(edge_emb).squeeze(-1)
+        edge_scores = self.decoder(self.decoder_ln(edge_emb)).squeeze(-1)
         return edge_scores
 
 
